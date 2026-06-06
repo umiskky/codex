@@ -10,6 +10,9 @@ use std::collections::BTreeMap;
 
 pub const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
 const MULTI_AGENT_V1_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
+pub const CODEXX_MULTI_AGENT_NAMESPACE: &str = "codexx_multi_agent";
+pub const CODEXX_MULTI_AGENT_NAMESPACE_DESCRIPTION: &str =
+    "Codexx tools for spawning and managing sub-agents.";
 
 const SPAWN_AGENT_INHERITED_MODEL_GUIDANCE: &str = "Spawned agents inherit your current model by default. Omit `model` to use that preferred default; set `model` only when an explicit override is needed.";
 const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
@@ -154,42 +157,81 @@ pub fn create_send_input_tool_v1() -> ToolSpec {
     })
 }
 
-pub fn create_register_agent_config_tool_v1() -> ToolSpec {
-    ToolSpec::Namespace(ResponsesApiNamespace {
-        name: MULTI_AGENT_V1_NAMESPACE.to_string(),
-        description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
-        tools: vec![ResponsesApiNamespaceTool::Function(
-            register_agent_config_tool(),
-        )],
-    })
+pub fn create_codexx_register_agent_tool() -> ToolSpec {
+    codexx_namespace_tool(register_agent_tool())
 }
 
-pub fn create_register_agent_config_tool_v2() -> ToolSpec {
-    ToolSpec::Function(register_agent_config_tool())
-}
-
-fn register_agent_config_tool() -> ResponsesApiTool {
+fn register_agent_tool() -> ResponsesApiTool {
     let properties = BTreeMap::from([(
-        "config_path".to_string(),
-        JsonSchema::string(Some(
-            "Path to a Codex config.toml file whose agents should be registered. Relative paths resolve against the current working directory."
+        "agent_config_paths".to_string(),
+        JsonSchema::array(
+            JsonSchema::string(Some(
+                "Absolute path to an agent role TOML file or a directory containing agent role TOML files. Relative paths are accepted and resolve against the current working directory, but absolute paths are recommended."
                 .to_string(),
-        )),
+            )),
+            Some("Agent role TOML file paths or directories to register, in order. Later entries override earlier entries when they define the same agent_type.".to_string()),
+        ),
     )]);
 
     ResponsesApiTool {
-        name: "register_agent_config".to_string(),
-        description: "Register agent_type definitions from the specified Codex config.toml. Agents with the same name override existing registered definitions. Returns all currently registered agent_type names."
+        name: "register_agent".to_string(),
+        description: "Register agent_type definitions from agent role TOML files or directories of role TOML files. Pass one or more paths with agent_config_paths; absolute paths are recommended. Agents with the same name override existing registered definitions. Returns all currently registered agent_type names."
             .to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
             properties,
-            Some(vec!["config_path".to_string()]),
+            Some(vec!["agent_config_paths".to_string()]),
             Some(false.into()),
         ),
         output_schema: None,
     }
+}
+
+pub fn create_codexx_resume_agent_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "target".to_string(),
+        JsonSchema::string(Some(
+            "Agent id, relative task name, or canonical task path to resume.".to_string(),
+        )),
+    )]);
+
+    codexx_namespace_tool(ResponsesApiTool {
+        name: "resume_agent".to_string(),
+        description: "Resume a previously closed agent by id, task name, or canonical task path."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["target".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(resume_agent_output_schema()),
+    })
+}
+
+pub fn create_codexx_wait_agent_status_tool(options: WaitAgentTimeoutOptions) -> ToolSpec {
+    let ToolSpec::Namespace(namespace) = create_wait_agent_tool_v1(options) else {
+        unreachable!("v1 wait_agent is always a namespace tool");
+    };
+    let ResponsesApiNamespaceTool::Function(mut tool) = namespace
+        .tools
+        .into_iter()
+        .next()
+        .expect("v1 wait_agent namespace should contain a function");
+    tool.name = "wait_agent_status".to_string();
+    tool.description = "Wait for agents to reach a final status by id, task name, or canonical task path. Completed statuses may include the agent's final message. Returns empty status when timed out."
+        .to_string();
+    codexx_namespace_tool(tool)
+}
+
+fn codexx_namespace_tool(tool: ResponsesApiTool) -> ToolSpec {
+    ToolSpec::Namespace(ResponsesApiNamespace {
+        name: CODEXX_MULTI_AGENT_NAMESPACE.to_string(),
+        description: CODEXX_MULTI_AGENT_NAMESPACE_DESCRIPTION.to_string(),
+        tools: vec![ResponsesApiNamespaceTool::Function(tool)],
+    })
 }
 
 pub fn create_send_message_tool() -> ToolSpec {

@@ -29,9 +29,12 @@ use crate::tools::handlers::ViewImageHandler;
 use crate::tools::handlers::WriteStdinHandler;
 use crate::tools::handlers::agent_jobs::ReportAgentJobResultHandler;
 use crate::tools::handlers::agent_jobs::SpawnAgentsOnCsvHandler;
+use crate::tools::handlers::codexx_multi_agent::RegisterAgentHandler as CodexxRegisterAgentHandler;
+use crate::tools::handlers::codexx_multi_agent::ResumeAgentHandler as CodexxResumeAgentHandler;
+use crate::tools::handlers::codexx_multi_agent::SpawnAgentHandler as CodexxSpawnAgentHandler;
+use crate::tools::handlers::codexx_multi_agent::WaitAgentStatusHandler as CodexxWaitAgentStatusHandler;
 use crate::tools::handlers::extension_tools::ExtensionToolAdapter;
 use crate::tools::handlers::multi_agents::CloseAgentHandler;
-use crate::tools::handlers::multi_agents::RegisterAgentConfigHandler;
 use crate::tools::handlers::multi_agents::ResumeAgentHandler;
 use crate::tools::handlers::multi_agents::SendInputHandler;
 use crate::tools::handlers::multi_agents::SpawnAgentHandler;
@@ -44,7 +47,6 @@ use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
-use crate::tools::handlers::multi_agents_v2::RegisterAgentConfigHandler as RegisterAgentConfigHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
@@ -669,16 +671,21 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
 
 fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
     let turn_context = context.turn_context;
+    add_codexx_multi_agent_tools(context, planned_tools);
+
     if collab_tools_enabled(turn_context) {
         if multi_agent_v2_enabled(turn_context) {
+            let Some(tool_namespace) = namespace_tools_enabled(turn_context)
+                .then_some(turn_context.config.multi_agent_v2.tool_namespace.as_deref())
+                .flatten()
+            else {
+                return;
+            };
             let exposure = if turn_context.config.multi_agent_v2.non_code_mode_only {
                 ToolExposure::DirectModelOnly
             } else {
                 ToolExposure::Direct
             };
-            let tool_namespace = namespace_tools_enabled(turn_context)
-                .then_some(turn_context.config.multi_agent_v2.tool_namespace.as_deref())
-                .flatten();
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
             planned_tools.add_arc(override_tool_exposure(
@@ -696,38 +703,34 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                             turn_context,
                         ),
                     }),
-                    tool_namespace,
+                    Some(tool_namespace),
                 ),
                 exposure,
             ));
             planned_tools.add_arc(override_tool_exposure(
-                multi_agent_v2_handler(SendMessageHandlerV2, tool_namespace),
+                multi_agent_v2_handler(SendMessageHandlerV2, Some(tool_namespace)),
                 exposure,
             ));
             planned_tools.add_arc(override_tool_exposure(
-                multi_agent_v2_handler(FollowupTaskHandlerV2, tool_namespace),
+                multi_agent_v2_handler(FollowupTaskHandlerV2, Some(tool_namespace)),
                 exposure,
             ));
             planned_tools.add_arc(override_tool_exposure(
                 multi_agent_v2_handler(
                     WaitAgentHandlerV2::new(context.wait_agent_timeouts),
-                    tool_namespace,
+                    Some(tool_namespace),
                 ),
                 exposure,
             ));
             planned_tools.add_arc(override_tool_exposure(
-                multi_agent_v2_handler(CloseAgentHandlerV2, tool_namespace),
+                multi_agent_v2_handler(CloseAgentHandlerV2, Some(tool_namespace)),
                 exposure,
             ));
             planned_tools.add_arc(override_tool_exposure(
-                multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace),
+                multi_agent_v2_handler(ListAgentsHandlerV2, Some(tool_namespace)),
                 exposure,
             ));
-            planned_tools.add_arc(override_tool_exposure(
-                multi_agent_v2_handler(RegisterAgentConfigHandlerV2, tool_namespace),
-                exposure,
-            ));
-        } else {
+        } else if official_multi_agent_v1_tools_enabled(turn_context) {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
             let exposure =
@@ -757,7 +760,6 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
             planned_tools
                 .add_with_exposure(WaitAgentHandler::new(context.wait_agent_timeouts), exposure);
             planned_tools.add_with_exposure(CloseAgentHandler, exposure);
-            planned_tools.add_with_exposure(RegisterAgentConfigHandler, exposure);
         }
     }
 
@@ -767,6 +769,55 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
             planned_tools.add(ReportAgentJobResultHandler);
         }
     }
+}
+
+fn official_multi_agent_v1_tools_enabled(_turn_context: &TurnContext) -> bool {
+    false
+}
+
+fn add_codexx_multi_agent_tools(
+    context: &CoreToolPlanContext<'_>,
+    planned_tools: &mut PlannedTools,
+) {
+    let turn_context = context.turn_context;
+    let agent_type_description =
+        agent_type_description(turn_context, context.default_agent_type_description);
+    planned_tools.add(CodexxRegisterAgentHandler);
+    planned_tools.add(CodexxSpawnAgentHandler::new(SpawnAgentToolOptions {
+        available_models: turn_context.available_models.clone(),
+        agent_type_description,
+        hide_agent_type_model_reasoning: turn_context
+            .config
+            .multi_agent_v2
+            .hide_spawn_agent_metadata,
+        include_usage_hint: turn_context.config.multi_agent_v2.usage_hint_enabled,
+        usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
+        max_concurrent_threads_per_session: max_concurrent_threads_per_session(turn_context),
+    }));
+    planned_tools.add(CodexxResumeAgentHandler);
+    planned_tools.add_arc(multi_agent_v2_handler(
+        SendMessageHandlerV2,
+        Some(crate::tools::handlers::multi_agents_spec::CODEXX_MULTI_AGENT_NAMESPACE),
+    ));
+    planned_tools.add_arc(multi_agent_v2_handler(
+        FollowupTaskHandlerV2,
+        Some(crate::tools::handlers::multi_agents_spec::CODEXX_MULTI_AGENT_NAMESPACE),
+    ));
+    planned_tools.add_arc(multi_agent_v2_handler(
+        WaitAgentHandlerV2::new(context.wait_agent_timeouts),
+        Some(crate::tools::handlers::multi_agents_spec::CODEXX_MULTI_AGENT_NAMESPACE),
+    ));
+    planned_tools.add(CodexxWaitAgentStatusHandler::new(
+        context.wait_agent_timeouts,
+    ));
+    planned_tools.add_arc(multi_agent_v2_handler(
+        CloseAgentHandlerV2,
+        Some(crate::tools::handlers::multi_agents_spec::CODEXX_MULTI_AGENT_NAMESPACE),
+    ));
+    planned_tools.add_arc(multi_agent_v2_handler(
+        ListAgentsHandlerV2,
+        Some(crate::tools::handlers::multi_agents_spec::CODEXX_MULTI_AGENT_NAMESPACE),
+    ));
 }
 
 fn add_mcp_runtime_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
@@ -931,9 +982,17 @@ impl ToolExecutor<ToolInvocation> for MultiAgentV2NamespaceOverride {
 
     fn spec(&self) -> ToolSpec {
         match self.handler.spec() {
+            ToolSpec::Namespace(spec) => ToolSpec::Namespace(spec),
             ToolSpec::Function(tool) => ToolSpec::Namespace(ResponsesApiNamespace {
                 name: self.namespace.clone(),
-                description: MULTI_AGENT_V2_NAMESPACE_DESCRIPTION.to_string(),
+                description: if self.namespace
+                    == crate::tools::handlers::multi_agents_spec::CODEXX_MULTI_AGENT_NAMESPACE
+                {
+                    crate::tools::handlers::multi_agents_spec::CODEXX_MULTI_AGENT_NAMESPACE_DESCRIPTION
+                        .to_string()
+                } else {
+                    MULTI_AGENT_V2_NAMESPACE_DESCRIPTION.to_string()
+                },
                 tools: vec![ResponsesApiNamespaceTool::Function(tool)],
             }),
             spec => spec,

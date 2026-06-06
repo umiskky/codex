@@ -59,43 +59,63 @@ pub(crate) async fn load_agent_roles(
     Ok(roles)
 }
 
-pub(crate) async fn load_agent_roles_from_config_file(
+pub(crate) async fn load_agent_roles_from_agent_paths(
     fs: &dyn ExecutorFileSystem,
-    config_path: &AbsolutePathBuf,
+    agent_config_paths: &[AbsolutePathBuf],
     startup_warnings: &mut Vec<String>,
 ) -> std::io::Result<BTreeMap<String, AgentRoleConfig>> {
-    let contents = fs.read_file_text(config_path, /*sandbox*/ None).await?;
-    let config: TomlValue = toml::from_str(&contents).map_err(|err| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "failed to parse agent config file at {}: {err}",
-                config_path.as_path().display()
-            ),
-        )
-    })?;
-    let config_folder = config_path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "agent config file path must have a parent directory: {}",
-                config_path.as_path().display()
-            ),
-        )
-    })?;
-    let roles =
-        load_agent_roles_from_layer(fs, &config, Some(&config_folder), startup_warnings).await?;
-    let mut validated_roles = BTreeMap::new();
-    for (role_name, role) in roles {
-        if let Err(err) =
-            validate_required_agent_role_description(&role_name, role.description.as_deref())
-        {
-            push_agent_role_warning(startup_warnings, err);
-            continue;
-        }
-        validated_roles.insert(role_name, role);
+    let mut roles = BTreeMap::new();
+    for agent_config_path in agent_config_paths {
+        let path_roles =
+            load_agent_roles_from_agent_path(fs, agent_config_path, startup_warnings).await?;
+        roles.extend(path_roles);
     }
-    Ok(validated_roles)
+    Ok(roles)
+}
+
+async fn load_agent_roles_from_agent_path(
+    fs: &dyn ExecutorFileSystem,
+    agent_config_path: &AbsolutePathBuf,
+    startup_warnings: &mut Vec<String>,
+) -> std::io::Result<BTreeMap<String, AgentRoleConfig>> {
+    let metadata = fs
+        .get_metadata(agent_config_path, /*sandbox*/ None)
+        .await
+        .map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "agent config path must exist at {}: {err}",
+                    agent_config_path.as_path().display()
+                ),
+            )
+        })?;
+
+    if metadata.is_file {
+        let mut roles = BTreeMap::new();
+        match read_registration_agent_role_file(fs, agent_config_path).await {
+            Ok((role_name, role)) => {
+                roles.insert(role_name, role);
+            }
+            Err(err) => {
+                push_agent_role_warning(startup_warnings, err);
+            }
+        }
+        return Ok(roles);
+    }
+
+    if metadata.is_directory {
+        return discover_agent_roles_for_registration(fs, agent_config_path, startup_warnings)
+            .await;
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "agent config path must point to a file or directory: {}",
+            agent_config_path.as_path().display()
+        ),
+    ))
 }
 
 async fn load_agent_roles_from_layer(
@@ -386,6 +406,32 @@ async fn read_resolved_agent_role_file(
     )
 }
 
+async fn read_registration_agent_role_file(
+    fs: &dyn ExecutorFileSystem,
+    path: &AbsolutePathBuf,
+) -> std::io::Result<(String, AgentRoleConfig)> {
+    let role_name_hint = path
+        .as_path()
+        .file_stem()
+        .and_then(|file_stem| file_stem.to_str())
+        .map(str::trim)
+        .filter(|file_stem| !file_stem.is_empty())
+        .map(ToOwned::to_owned);
+    let parsed_file = read_resolved_agent_role_file(fs, path, role_name_hint.as_deref()).await?;
+    validate_required_agent_role_description(
+        &parsed_file.role_name,
+        parsed_file.description.as_deref(),
+    )?;
+    Ok((
+        parsed_file.role_name,
+        AgentRoleConfig {
+            description: parsed_file.description,
+            config_file: Some(path.to_path_buf()),
+            nickname_candidates: parsed_file.nickname_candidates,
+        },
+    ))
+}
+
 fn normalize_agent_role_description(
     field_label: &str,
     description: Option<&str>,
@@ -567,6 +613,27 @@ async fn discover_agent_roles_in_dir(
                 nickname_candidates: parsed_file.nickname_candidates,
             },
         );
+    }
+
+    Ok(roles)
+}
+
+async fn discover_agent_roles_for_registration(
+    fs: &dyn ExecutorFileSystem,
+    agents_dir: &AbsolutePathBuf,
+    startup_warnings: &mut Vec<String>,
+) -> std::io::Result<BTreeMap<String, AgentRoleConfig>> {
+    let mut roles = BTreeMap::new();
+
+    for agent_file in collect_agent_role_files(fs, agents_dir).await? {
+        match read_registration_agent_role_file(fs, &agent_file).await {
+            Ok((role_name, role)) => {
+                roles.insert(role_name, role);
+            }
+            Err(err) => {
+                push_agent_role_warning(startup_warnings, err);
+            }
+        }
     }
 
     Ok(roles)

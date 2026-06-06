@@ -2,6 +2,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use rand::prelude::IndexedRandom;
@@ -28,6 +29,8 @@ pub(crate) struct AgentRegistry {
 #[derive(Default)]
 struct ActiveAgents {
     agent_tree: HashMap<String, AgentMetadata>,
+    known_agent_paths: HashMap<String, ThreadId>,
+    known_agent_configs: HashMap<ThreadId, AgentConfigMetadata>,
     used_agent_nicknames: HashSet<String>,
     nickname_reset_count: usize,
 }
@@ -39,6 +42,12 @@ pub(crate) struct AgentMetadata {
     pub(crate) agent_nickname: Option<String>,
     pub(crate) agent_role: Option<String>,
     pub(crate) last_task_message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentConfigMetadata {
+    pub(crate) model: String,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
 }
 
 fn format_agent_nickname(name: &str, nickname_reset_count: usize) -> String {
@@ -142,6 +151,43 @@ impl AgentRegistry {
             .and_then(|metadata| metadata.agent_id)
     }
 
+    pub(crate) fn known_agent_id_for_path(&self, agent_path: &AgentPath) -> Option<ThreadId> {
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .known_agent_paths
+            .get(agent_path.as_str())
+            .copied()
+    }
+
+    pub(crate) fn known_agent_config(&self, thread_id: ThreadId) -> Option<AgentConfigMetadata> {
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .known_agent_configs
+            .get(&thread_id)
+            .cloned()
+    }
+
+    pub(crate) fn update_known_agent_config(
+        &self,
+        thread_id: ThreadId,
+        model: String,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) {
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .known_agent_configs
+            .insert(
+                thread_id,
+                AgentConfigMetadata {
+                    model,
+                    reasoning_effort,
+                },
+            );
+    }
+
     pub(crate) fn agent_metadata_for_thread(&self, thread_id: ThreadId) -> Option<AgentMetadata> {
         self.active_agents
             .lock()
@@ -193,6 +239,11 @@ impl AgentRegistry {
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_else(|| format!("thread:{thread_id}"));
+        if agent_metadata.agent_path.is_some() {
+            active_agents
+                .known_agent_paths
+                .insert(key.clone(), thread_id);
+        }
         if let Some(agent_nickname) = agent_metadata.agent_nickname.clone() {
             active_agents.used_agent_nicknames.insert(agent_nickname);
         }

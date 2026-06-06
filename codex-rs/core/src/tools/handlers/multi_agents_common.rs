@@ -331,18 +331,18 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct RegisterAgentConfigArgs {
-    config_path: PathBuf,
+pub(crate) struct RegisterAgentArgs {
+    agent_config_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct RegisterAgentConfigResult {
+pub(crate) struct RegisterAgentResult {
     agent_types: Vec<String>,
 }
 
-pub(crate) async fn handle_register_agent_config(
+pub(crate) async fn handle_register_agent(
     invocation: ToolInvocation,
-) -> Result<RegisterAgentConfigResult, FunctionCallError> {
+) -> Result<RegisterAgentResult, FunctionCallError> {
     let ToolInvocation {
         session,
         turn,
@@ -350,26 +350,35 @@ pub(crate) async fn handle_register_agent_config(
         ..
     } = invocation;
     let arguments = function_arguments(payload)?;
-    let args: RegisterAgentConfigArgs = parse_arguments(&arguments)?;
+    let args: RegisterAgentArgs = parse_arguments(&arguments)?;
     let mut config = (*session.get_config().await).clone();
     #[allow(deprecated)]
     {
         config.cwd = turn.cwd.clone();
     }
-    let config_path = args.config_path;
+    let agent_config_paths = args.agent_config_paths;
+    if agent_config_paths.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "agent_config_paths must contain at least one agent TOML file or directory".to_string(),
+        ));
+    }
     let agent_types = config
-        .register_agent_config(&config_path)
+        .register_agent(&agent_config_paths)
         .await
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!(
-                "failed to register agent config `{}`: {err}",
-                config_path.display()
+                "failed to register agent config paths `{}`: {err}",
+                agent_config_paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ))
         })?;
     session
         .replace_runtime_agent_roles(config.agent_roles, config.startup_warnings)
         .await;
-    Ok(RegisterAgentConfigResult { agent_types })
+    Ok(RegisterAgentResult { agent_types })
 }
 
 pub(crate) async fn sync_registered_agent_roles(session: &Session, config: &mut Config) {
@@ -378,9 +387,9 @@ pub(crate) async fn sync_registered_agent_roles(session: &Session, config: &mut 
         .extend(session.get_config().await.agent_roles.clone());
 }
 
-impl ToolOutput for RegisterAgentConfigResult {
+impl ToolOutput for RegisterAgentResult {
     fn log_preview(&self) -> String {
-        tool_output_json_text(self, "register_agent_config")
+        tool_output_json_text(self, "register_agent")
     }
 
     fn success_for_logging(&self) -> bool {
@@ -388,11 +397,11 @@ impl ToolOutput for RegisterAgentConfigResult {
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
-        tool_output_response_item(call_id, payload, self, Some(true), "register_agent_config")
+        tool_output_response_item(call_id, payload, self, Some(true), "register_agent")
     }
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
-        tool_output_code_mode_result(self, "register_agent_config")
+        tool_output_code_mode_result(self, "register_agent")
     }
 }
 

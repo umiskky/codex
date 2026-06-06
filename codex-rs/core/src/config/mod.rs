@@ -1435,15 +1435,18 @@ impl Config {
         !self.features.enabled(Feature::NonPrefixedMcpToolNames)
     }
 
-    pub(crate) async fn register_agent_config(
+    pub(crate) async fn register_agent(
         &mut self,
-        config_path: impl AsRef<Path>,
+        agent_config_paths: &[PathBuf],
     ) -> std::io::Result<Vec<String>> {
-        let config_path = self.resolve_agent_config_path(config_path.as_ref())?;
+        let agent_config_paths = agent_config_paths
+            .iter()
+            .map(|path| self.resolve_agent_registration_path(path))
+            .collect::<std::io::Result<Vec<_>>>()?;
         let mut startup_warnings = Vec::new();
-        let agent_roles = agent_roles::load_agent_roles_from_config_file(
+        let agent_roles = agent_roles::load_agent_roles_from_agent_paths(
             LOCAL_FS.as_ref(),
-            &config_path,
+            &agent_config_paths,
             &mut startup_warnings,
         )
         .await?;
@@ -1456,12 +1459,12 @@ impl Config {
         self.agent_roles.keys().cloned().collect()
     }
 
-    fn resolve_agent_config_path(&self, config_path: &Path) -> std::io::Result<AbsolutePathBuf> {
-        if config_path.is_absolute() {
-            AbsolutePathBuf::from_absolute_path(config_path)
+    fn resolve_agent_registration_path(&self, path: &Path) -> std::io::Result<AbsolutePathBuf> {
+        if path.is_absolute() {
+            AbsolutePathBuf::from_absolute_path(path)
         } else {
             Ok(AbsolutePathBuf::resolve_path_against_base(
-                config_path,
+                path,
                 self.cwd.as_path(),
             ))
         }

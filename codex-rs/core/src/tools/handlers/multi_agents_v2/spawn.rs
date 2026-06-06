@@ -16,11 +16,22 @@ use codex_tools::ToolSpec;
 #[derive(Default)]
 pub(crate) struct Handler {
     options: SpawnAgentToolOptions,
+    sync_runtime_agent_roles: bool,
 }
 
 impl Handler {
     pub(crate) fn new(options: SpawnAgentToolOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            sync_runtime_agent_roles: false,
+        }
+    }
+
+    pub(crate) fn new_with_runtime_agent_roles(options: SpawnAgentToolOptions) -> Self {
+        Self {
+            options,
+            sync_runtime_agent_roles: true,
+        }
     }
 }
 
@@ -38,12 +49,15 @@ impl ToolExecutor<ToolInvocation> for Handler {
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
-        handle_spawn_agent(invocation).await.map(boxed_tool_output)
+        handle_spawn_agent(invocation, self.sync_runtime_agent_roles)
+            .await
+            .map(boxed_tool_output)
     }
 }
 
 async fn handle_spawn_agent(
     invocation: ToolInvocation,
+    sync_runtime_agent_roles_for_spawn: bool,
 ) -> Result<SpawnAgentResult, FunctionCallError> {
     let ToolInvocation {
         session,
@@ -96,7 +110,9 @@ async fn handle_spawn_agent(
             args.reasoning_effort,
         )
         .await?;
-        sync_registered_agent_roles(session.as_ref(), &mut config).await;
+        if sync_runtime_agent_roles_for_spawn {
+            sync_registered_agent_roles(session.as_ref(), &mut config).await;
+        }
         apply_role_to_config(&mut config, role_name)
             .await
             .map_err(FunctionCallError::RespondToModel)?;

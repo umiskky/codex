@@ -6821,8 +6821,7 @@ nickname_candidates = ["Hypatia", "Noether"]
 }
 
 #[tokio::test]
-async fn register_agent_config_loads_agents_from_config_toml_and_overrides_existing()
--> std::io::Result<()> {
+async fn register_agent_loads_agent_paths_and_overrides_existing() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let old_role_config_path = codex_home.path().join("old").join("researcher.toml");
     tokio::fs::create_dir_all(
@@ -6851,12 +6850,20 @@ config_file = "./old/researcher.toml"
         .await?;
 
     let project = TempDir::new()?;
-    let project_config_dir = project.path().join(".codex");
-    let new_role_config_path = project_config_dir.join("agents").join("researcher.toml");
+    let project_agents_dir = project.path().join("agents");
+    let new_role_config_path = project_agents_dir.join("researcher.toml");
+    let reviewer_role_config_path = project_agents_dir.join("reviewer.toml");
+    let override_role_config_path = project.path().join("overrides").join("researcher.toml");
     tokio::fs::create_dir_all(
         new_role_config_path
             .parent()
             .expect("new role config should have a parent directory"),
+    )
+    .await?;
+    tokio::fs::create_dir_all(
+        override_role_config_path
+            .parent()
+            .expect("override role config should have a parent directory"),
     )
     .await?;
     tokio::fs::write(
@@ -6870,24 +6877,47 @@ model = "gpt-5.4"
     )
     .await?;
     tokio::fs::write(
-        project_config_dir.join(CONFIG_TOML_FILE),
-        r#"[agents.researcher]
-description = "Config metadata should be replaced by file metadata"
-config_file = "./agents/researcher.toml"
+        &reviewer_role_config_path,
+        r#"
+description = "Reviewer role"
+developer_instructions = "Review carefully"
+model = "gpt-5.4"
+"#,
+    )
+    .await?;
+    tokio::fs::write(
+        &override_role_config_path,
+        r#"
+name = "researcher"
+description = "Override research role"
+nickname_candidates = ["Turing"]
+developer_instructions = "Override role"
+model = "gpt-5.5"
 "#,
     )
     .await?;
 
     let agent_types = config
-        .register_agent_config(project_config_dir.join(CONFIG_TOML_FILE))
+        .register_agent(&[project_agents_dir, override_role_config_path.clone()])
         .await?;
-    assert_eq!(agent_types, vec!["researcher".to_string()]);
+    assert_eq!(
+        agent_types,
+        vec!["researcher".to_string(), "reviewer".to_string()]
+    );
     assert_eq!(
         config.agent_roles.get("researcher"),
         Some(&AgentRoleConfig {
-            description: Some("New research role".to_string()),
-            config_file: Some(new_role_config_path),
-            nickname_candidates: Some(vec!["Curie".to_string()]),
+            description: Some("Override research role".to_string()),
+            config_file: Some(override_role_config_path),
+            nickname_candidates: Some(vec!["Turing".to_string()]),
+        })
+    );
+    assert_eq!(
+        config.agent_roles.get("reviewer"),
+        Some(&AgentRoleConfig {
+            description: Some("Reviewer role".to_string()),
+            config_file: Some(reviewer_role_config_path),
+            nickname_candidates: None,
         })
     );
 

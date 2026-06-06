@@ -1496,6 +1496,44 @@ fn session_header_hides_fast_status_when_disabled() {
 }
 
 #[test]
+fn session_header_displays_ascii_banner_when_terminal_is_wide() {
+    let cell = SessionHeaderHistoryCell::new(
+        "gpt-4o".to_string(),
+        Some(ReasoningEffortConfig::High),
+        /*show_fast_status*/ false,
+        test_path_buf("/tmp/project").abs().to_path_buf(),
+        "test",
+    );
+
+    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
+
+    assert!(rendered.contains(".:::+:::."));
+    assert!(rendered.contains("OpenAI Codex"));
+    assert!(rendered.contains("model:"));
+    assert!(rendered.contains("gpt-4o high"));
+    assert!(rendered.contains("directory: /tmp/project"));
+}
+
+#[test]
+fn session_header_hides_ascii_banner_when_terminal_is_narrow() {
+    let cell = SessionHeaderHistoryCell::new(
+        "gpt-4o".to_string(),
+        Some(ReasoningEffortConfig::High),
+        /*show_fast_status*/ false,
+        test_path_buf("/tmp/project").abs().to_path_buf(),
+        "test",
+    );
+
+    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+
+    assert!(!rendered.contains(".:::+:::."));
+    assert!(rendered.contains("OpenAI Codex"));
+    assert!(rendered.contains("model:"));
+    assert!(rendered.contains("gpt-4o high"));
+    assert!(rendered.contains("directory: /tmp/project"));
+}
+
+#[test]
 #[cfg_attr(
     target_os = "windows",
     ignore = "snapshot path rendering differs on Windows"

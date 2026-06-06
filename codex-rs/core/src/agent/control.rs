@@ -299,6 +299,12 @@ impl AgentControl {
         };
         agent_metadata.agent_id = Some(new_thread.thread_id);
         reservation.commit(agent_metadata.clone());
+        let thread_config = new_thread.thread.codex.thread_config_snapshot().await;
+        self.state.update_known_agent_config(
+            new_thread.thread_id,
+            thread_config.model.clone(),
+            thread_config.reasoning_effort,
+        );
 
         if let Some(SessionSource::SubAgent(
             subagent_source @ SubAgentSource::ThreadSpawn {
@@ -326,7 +332,6 @@ impl AgentControl {
                     }
                 }
             };
-            let thread_config = new_thread.thread.codex.thread_config_snapshot().await;
             let parent_thread_id = thread_config.parent_thread_id;
             emit_subagent_session_started(
                 &new_thread
@@ -619,7 +624,12 @@ impl AgentControl {
             .history
             .ok_or_else(|| CodexErr::ThreadNotFound(thread_id))?
             .items;
-        apply_resume_config_from_rollout_history(&mut config, &history);
+        if !apply_resume_config_from_rollout_history(&mut config, &history)
+            && let Some(known_config) = self.state.known_agent_config(thread_id)
+        {
+            config.model = Some(known_config.model);
+            config.model_reasoning_effort = known_config.reasoning_effort;
+        }
         let initial_history = InitialHistory::Resumed(ResumedHistory {
             conversation_id: thread_id,
             history,
@@ -690,6 +700,12 @@ impl AgentControl {
         let mut agent_metadata = agent_metadata;
         agent_metadata.agent_id = Some(resumed_thread.thread_id);
         reservation.commit(agent_metadata.clone());
+        let thread_config = resumed_thread.thread.config_snapshot().await;
+        self.state.update_known_agent_config(
+            resumed_thread.thread_id,
+            thread_config.model,
+            thread_config.reasoning_effort,
+        );
         // Resumed threads are re-registered in-memory and need the same listener
         // attachment path as freshly spawned threads.
         state.notify_thread_created(resumed_thread.thread_id);
@@ -785,6 +801,12 @@ impl AgentControl {
     pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         let state = self.upgrade()?;
         let result = if let Ok(thread) = state.get_thread(agent_id).await {
+            let config_snapshot = thread.config_snapshot().await;
+            self.state.update_known_agent_config(
+                agent_id,
+                config_snapshot.model,
+                config_snapshot.reasoning_effort,
+            );
             thread.codex.session.ensure_rollout_materialized().await;
             thread.codex.session.flush_rollout().await?;
             let result = if matches!(thread.agent_status().await, AgentStatus::Shutdown) {
@@ -927,6 +949,45 @@ impl AgentControl {
             "live agent path `{}` not found",
             agent_path.as_str()
         )))
+    }
+
+    pub(crate) async fn resolve_agent_path_including_stored(
+        &self,
+        current_thread_id: ThreadId,
+        agent_path: &AgentPath,
+    ) -> CodexResult<ThreadId> {
+        if let Some(thread_id) = self.state.agent_id_for_path(agent_path) {
+            return Ok(thread_id);
+        }
+        if let Some(thread_id) = self.state.known_agent_id_for_path(agent_path) {
+            return Ok(thread_id);
+        }
+
+        let state = self.upgrade()?;
+        let root_thread_id = self
+            .state
+            .agent_id_for_path(&AgentPath::root())
+            .unwrap_or(current_thread_id);
+        let Some(state_db_ctx) = state.state_db() else {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "agent path `{}` not found",
+                agent_path.as_str()
+            )));
+        };
+        match state_db_ctx
+            .find_thread_spawn_descendant_by_path(root_thread_id, agent_path.as_str())
+            .await
+        {
+            Ok(Some(thread_id)) => Ok(thread_id),
+            Ok(None) => Err(CodexErr::UnsupportedOperation(format!(
+                "agent path `{}` not found",
+                agent_path.as_str()
+            ))),
+            Err(err) => Err(CodexErr::Fatal(format!(
+                "failed to resolve stored agent path `{}`: {err}",
+                agent_path.as_str()
+            ))),
+        }
     }
 
     /// Subscribe to status updates for `agent_id`, yielding the latest value and changes.
@@ -1343,14 +1404,15 @@ fn thread_spawn_depth(session_source: &SessionSource) -> Option<i32> {
     }
 }
 
-fn apply_resume_config_from_rollout_history(config: &mut Config, history: &[RolloutItem]) {
+fn apply_resume_config_from_rollout_history(config: &mut Config, history: &[RolloutItem]) -> bool {
     let Some(turn_context) = history.iter().rev().find_map(|item| match item {
         RolloutItem::TurnContext(turn_context) => Some(turn_context),
         _ => None,
     }) else {
-        return;
+        return false;
     };
     apply_resume_config_from_turn_context(config, turn_context);
+    true
 }
 
 fn apply_resume_config_from_turn_context(config: &mut Config, turn_context: &TurnContextItem) {

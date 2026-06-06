@@ -2,6 +2,7 @@ pub(crate) mod agent_jobs;
 pub(crate) mod agent_jobs_spec;
 pub(crate) mod apply_patch;
 pub(crate) mod apply_patch_spec;
+pub(crate) mod codexx_multi_agent;
 mod dynamic;
 pub(crate) mod extension_tools;
 mod goal;

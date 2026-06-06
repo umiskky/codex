@@ -3,6 +3,8 @@
 use super::*;
 
 pub(crate) const SESSION_HEADER_MAX_INNER_WIDTH: usize = 56; // Just an eyeballed value
+const SESSION_ASCII_BANNER_INNER_WIDTH: usize = 100;
+const WECHAT_ASCII_BANNER: &str = include_str!("wechat_ascii_banner.txt");
 
 pub(crate) fn card_inner_width(width: u16, max_inner_width: usize) -> Option<usize> {
     if width < 4 {
@@ -331,7 +333,14 @@ impl SessionHeaderHistoryCell {
 
 impl HistoryCell for SessionHeaderHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let Some(inner_width) = card_inner_width(width, SESSION_HEADER_MAX_INNER_WIDTH) else {
+        let show_ascii_banner =
+            usize::from(width.saturating_sub(4)) >= SESSION_ASCII_BANNER_INNER_WIDTH;
+        let max_inner_width = if show_ascii_banner {
+            SESSION_ASCII_BANNER_INNER_WIDTH
+        } else {
+            SESSION_HEADER_MAX_INNER_WIDTH
+        };
+        let Some(inner_width) = card_inner_width(width, max_inner_width) else {
             return Vec::new();
         };
 
@@ -387,12 +396,22 @@ impl HistoryCell for SessionHeaderHistoryCell {
         let dir = self.format_directory(Some(dir_max_width));
         let dir_spans = vec![Span::from(dir_prefix).dim(), Span::from(dir)];
 
-        let mut lines = vec![
+        let mut lines = Vec::new();
+        if show_ascii_banner {
+            lines.extend(
+                WECHAT_ASCII_BANNER
+                    .lines()
+                    .map(|line| Line::from(Span::from(line.to_string()).dim())),
+            );
+            lines.push(make_row(Vec::new()));
+        }
+
+        lines.extend([
             make_row(title_spans),
             make_row(Vec::new()),
             make_row(model_spans),
             make_row(dir_spans),
-        ];
+        ]);
 
         if self.yolo_mode {
             let permissions_label = format!("{PERMISSIONS_LABEL:<label_width$}");
@@ -402,7 +421,11 @@ impl HistoryCell for SessionHeaderHistoryCell {
             ]));
         }
 
-        with_border(lines)
+        if show_ascii_banner {
+            with_border_with_inner_width(lines, inner_width)
+        } else {
+            with_border(lines)
+        }
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {

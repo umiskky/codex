@@ -1,7 +1,6 @@
 use super::*;
 use crate::ThreadManager;
 use crate::config::AgentRoleConfig;
-use crate::config::CONFIG_TOML_FILE;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
@@ -9,10 +8,13 @@ use crate::session::tests::make_session_and_context;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::codexx_multi_agent::RegisterAgentHandler as CodexxRegisterAgentHandler;
+use crate::tools::handlers::codexx_multi_agent::ResumeAgentHandler as CodexxResumeAgentHandler;
+use crate::tools::handlers::codexx_multi_agent::SpawnAgentHandler as CodexxSpawnAgentHandler;
+use crate::tools::handlers::codexx_multi_agent::WaitAgentStatusHandler as CodexxWaitAgentStatusHandler;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
-use crate::tools::handlers::multi_agents_v2::RegisterAgentConfigHandler as RegisterAgentConfigHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
@@ -304,15 +306,15 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
 }
 
 #[tokio::test]
-async fn register_agent_config_registers_agents_and_spawn_uses_them_without_restart() {
+async fn codexx_register_agent_registers_agents_and_spawn_uses_them_without_restart() {
     #[derive(Debug, Deserialize)]
-    struct RegisterAgentConfigResult {
+    struct RegisterAgentResult {
         agent_types: Vec<String>,
     }
 
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
-        agent_id: String,
+        task_name: String,
     }
 
     let (mut session, mut turn) = make_session_and_context().await;
@@ -324,22 +326,14 @@ async fn register_agent_config_registers_agents_and_spawn_uses_them_without_rest
         .expect("project agents dir should be created");
     tokio::fs::write(
         project_agents_dir.join("fresh.toml"),
-        r#"developer_instructions = "Use the fresh project role."
+        r#"description = "Fresh project role"
+developer_instructions = "Use the fresh project role."
 model = "gpt-5.4"
 model_reasoning_effort = "minimal"
 "#,
     )
     .await
     .expect("project role config should be written");
-    tokio::fs::write(
-        project_config_dir.join(CONFIG_TOML_FILE),
-        r#"[agents.fresh]
-description = "Fresh project role"
-config_file = "./agents/fresh.toml"
-"#,
-    )
-    .await
-    .expect("project config should declare the fresh role");
 
     let mut config = (*turn.config).clone();
     config.cwd = project.path().abs();
@@ -353,39 +347,48 @@ config_file = "./agents/fresh.toml"
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 
-    let register_output = RegisterAgentConfigHandler
+    let register_output = CodexxRegisterAgentHandler
         .handle(invocation(
             Arc::clone(&session),
             Arc::clone(&turn),
-            "register_agent_config",
+            "register_agent",
             function_payload(json!({
-                "config_path": project_config_dir.join(CONFIG_TOML_FILE),
+                "agent_config_paths": [project_agents_dir.join("fresh.toml")],
             })),
         ))
         .await
-        .expect("register_agent_config should load the project config agents");
+        .expect("register_agent should load the project role file");
     let (register_content, _) = expect_text_output(register_output);
-    let register_result: RegisterAgentConfigResult =
+    let register_result: RegisterAgentResult =
         serde_json::from_str(&register_content).expect("register result should be json");
     assert_eq!(register_result.agent_types, vec!["fresh".to_string()]);
 
-    let output = SpawnAgentHandler::default()
+    let output = CodexxSpawnAgentHandler::default()
         .handle(invocation(
             Arc::clone(&session),
             Arc::clone(&turn),
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect this repo",
-                "agent_type": "fresh"
+                "task_name": "fresh_task",
+                "agent_type": "fresh",
+                "fork_turns": "none"
             })),
         ))
         .await
-        .expect("spawn_agent should reload and use the project role");
+        .expect("codexx spawn_agent should use the project role");
     let (content, _) = expect_text_output(output);
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
+    assert_eq!(result.task_name, "/root/fresh_task");
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "fresh_task")
+        .await
+        .expect("fresh task should resolve");
     let snapshot = manager
-        .get_thread(parse_agent_id(&result.agent_id))
+        .get_thread(agent_id)
         .await
         .expect("spawned agent thread should exist")
         .config_snapshot()
@@ -396,9 +399,9 @@ config_file = "./agents/fresh.toml"
 }
 
 #[tokio::test]
-async fn register_agent_config_v2_registers_agents() {
+async fn codexx_register_agent_accepts_relative_agent_directory() {
     #[derive(Debug, Deserialize)]
-    struct RegisterAgentConfigResult {
+    struct RegisterAgentResult {
         agent_types: Vec<String>,
     }
 
@@ -411,21 +414,13 @@ async fn register_agent_config_v2_registers_agents() {
         .expect("project agents dir should be created");
     tokio::fs::write(
         project_agents_dir.join("reviewer.toml"),
-        r#"developer_instructions = "Review carefully."
+        r#"description = "Reviewer role"
+developer_instructions = "Review carefully."
 model = "gpt-5.4"
 "#,
     )
     .await
     .expect("project role config should be written");
-    tokio::fs::write(
-        project_config_dir.join(CONFIG_TOML_FILE),
-        r#"[agents.reviewer]
-description = "Reviewer role"
-config_file = "./agents/reviewer.toml"
-"#,
-    )
-    .await
-    .expect("project config should declare the reviewer role");
 
     let mut config = (*turn.config).clone();
     config.cwd = project.path().abs();
@@ -435,19 +430,19 @@ config_file = "./agents/reviewer.toml"
     }
     turn.config = Arc::new(config);
 
-    let output = RegisterAgentConfigHandlerV2
+    let output = CodexxRegisterAgentHandler
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
-            "register_agent_config",
+            "register_agent",
             function_payload(json!({
-                "config_path": ".codex/config.toml",
+                "agent_config_paths": [".codex/agents"],
             })),
         ))
         .await
-        .expect("register_agent_config should load relative project config path");
+        .expect("register_agent should load relative project agent directory");
     let (content, _) = expect_text_output(output);
-    let result: RegisterAgentConfigResult =
+    let result: RegisterAgentResult =
         serde_json::from_str(&content).expect("register result should be json");
     assert_eq!(result.agent_types, vec!["reviewer".to_string()]);
 }
@@ -2926,6 +2921,117 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
 }
 
 #[tokio::test]
+async fn codexx_resume_agent_resolves_task_name_and_preserves_child_model_and_effort() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        task_name: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ResumeAgentResult {
+        status: AgentStatus,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let mut resume_turn = turn
+        .with_model("gpt-parent".to_string(), &session.services.models_manager)
+        .await;
+    resume_turn.reasoning_effort = Some(ReasoningEffort::High);
+    let mut resume_config = (*resume_turn.config).clone();
+    resume_config.model_reasoning_effort = Some(ReasoningEffort::High);
+    set_turn_config(&mut resume_turn, resume_config);
+
+    let session = Arc::new(session);
+    let spawn_turn = Arc::new(turn);
+    let spawn_output = CodexxSpawnAgentHandler::default()
+        .handle(invocation(
+            session.clone(),
+            spawn_turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "remember your child config",
+                "task_name": "resume_target",
+                "model": "gpt-5.4",
+                "reasoning_effort": "low",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("codexx spawn_agent should succeed");
+    let (content, _) = expect_text_output(spawn_output);
+    let spawn_result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    assert_eq!(spawn_result.task_name, "/root/resume_target");
+    let child_thread_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(
+            session.thread_id,
+            &spawn_turn.session_source,
+            "resume_target",
+        )
+        .await
+        .expect("resume target should resolve");
+
+    session
+        .services
+        .agent_control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child shutdown should submit");
+    assert_eq!(
+        session
+            .services
+            .agent_control
+            .get_status(child_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
+
+    let resume_output = CodexxResumeAgentHandler
+        .handle(invocation(
+            session.clone(),
+            Arc::new(resume_turn),
+            "resume_agent",
+            function_payload(json!({"target": "resume_target"})),
+        ))
+        .await
+        .expect("codexx resume_agent should resolve task name");
+    let (content, success) = expect_text_output(resume_output);
+    let resume_result: ResumeAgentResult =
+        serde_json::from_str(&content).expect("resume_agent result should be json");
+    assert_ne!(resume_result.status, AgentStatus::NotFound);
+    assert_eq!(success, Some(true));
+
+    let snapshot = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("resumed child thread should exist")
+        .config_snapshot()
+        .await;
+    assert_eq!(snapshot.model, "gpt-5.4");
+    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Low));
+    assert_eq!(
+        snapshot.session_source.get_agent_path().as_deref(),
+        Some("/root/resume_target")
+    );
+}
+
+#[tokio::test]
 async fn resume_agent_rejects_when_depth_limit_exceeded() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -3491,6 +3597,85 @@ async fn wait_agent_returns_final_status_without_timeout() {
         result,
         wait::WaitAgentResult {
             status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
+            timed_out: false
+        }
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn codexx_wait_agent_status_resolves_task_name_and_returns_final_status() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        task_name: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let spawn_output = CodexxSpawnAgentHandler::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "finish eventually",
+                "task_name": "status_target",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("codexx spawn_agent should succeed");
+    let (content, _) = expect_text_output(spawn_output);
+    let spawn_result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    assert_eq!(spawn_result.task_name, "/root/status_target");
+    let child_thread_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "status_target")
+        .await
+        .expect("status target should resolve");
+    session
+        .services
+        .agent_control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child shutdown should submit");
+
+    let output = CodexxWaitAgentStatusHandler::default()
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent_status",
+            function_payload(json!({
+                "targets": ["status_target"],
+                "timeout_ms": 10_000
+            })),
+        ))
+        .await
+        .expect("codexx wait_agent_status should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent_status result should be json");
+    assert_eq!(
+        result,
+        wait::WaitAgentResult {
+            status: HashMap::from([("/root/status_target".to_string(), AgentStatus::NotFound)]),
             timed_out: false
         }
     );
