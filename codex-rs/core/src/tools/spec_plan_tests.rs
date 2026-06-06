@@ -948,6 +948,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
     v1.assert_visible_contains(&[MULTI_AGENT_V1_NAMESPACE]);
     v1.assert_visible_lacks(&[
         "spawn_agent",
+        "register_agent_config",
         "send_input",
         "resume_agent",
         "wait_agent",
@@ -961,6 +962,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         v1.namespace_function_names(MULTI_AGENT_V1_NAMESPACE),
         &[
             "close_agent".to_string(),
+            "register_agent_config".to_string(),
             "resume_agent".to_string(),
             "send_input".to_string(),
             "spawn_agent".to_string(),
@@ -982,6 +984,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "wait_agent",
         "close_agent",
         "list_agents",
+        "register_agent_config",
     ]);
     v2.assert_visible_lacks(&["send_input", "resume_agent", "assign_task"]);
     let spawn_agent_description = match v2.visible_spec("spawn_agent") {
@@ -989,6 +992,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         other => panic!("expected spawn_agent function spec, got {other:?}"),
     };
     assert!(spawn_agent_description.contains("max_concurrent_threads_per_session = 17"));
+    assert!(has_parameter(v2.visible_spec("spawn_agent"), "agent_type"));
 
     let direct_model_only = probe(|turn| {
         set_features(
@@ -1037,6 +1041,7 @@ async fn v1_multi_agent_tools_defer_when_tool_search_available() {
     plan.assert_visible_contains(&["tool_search"]);
     plan.assert_visible_lacks(&[
         "spawn_agent",
+        "register_agent_config",
         "send_input",
         "resume_agent",
         "wait_agent",
@@ -1044,6 +1049,7 @@ async fn v1_multi_agent_tools_defer_when_tool_search_available() {
     ]);
     for tool_name in [
         "spawn_agent",
+        "register_agent_config",
         "send_input",
         "resume_agent",
         "wait_agent",
@@ -1101,6 +1107,7 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
         "wait_agent",
         "close_agent",
         "list_agents",
+        "register_agent_config",
     ] {
         namespaced.assert_visible_lacks(&[tool_name]);
         assert!(
@@ -1137,7 +1144,12 @@ async fn multi_agent_v2_namespace_is_supported_by_bedrock_provider() {
     .await;
 
     plan.assert_visible_contains(&["agents"]);
-    plan.assert_visible_lacks(&["spawn_agent", "send_message", "list_agents"]);
+    plan.assert_visible_lacks(&[
+        "spawn_agent",
+        "send_message",
+        "list_agents",
+        "register_agent_config",
+    ]);
     assert!(
         !plan
             .registered_names
@@ -1191,6 +1203,7 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
         "wait_agent",
         "close_agent",
         "list_agents",
+        "register_agent_config",
     ] {
         assert!(
             plan.namespace_function_names("agents")

@@ -1,6 +1,7 @@
 use super::*;
 use crate::ThreadManager;
 use crate::config::AgentRoleConfig;
+use crate::config::CONFIG_TOML_FILE;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
@@ -11,6 +12,7 @@ use crate::tools::context::ToolOutput;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
+use crate::tools::handlers::multi_agents_v2::RegisterAgentConfigHandler as RegisterAgentConfigHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
@@ -53,6 +55,7 @@ use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::user_input::UserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
+use core_test_support::PathExt;
 use core_test_support::TempDirExt;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
@@ -298,6 +301,155 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
         .await;
     assert_eq!(snapshot.approval_policy, AskForApproval::OnRequest);
     assert_eq!(snapshot.model_provider_id, "ollama");
+}
+
+#[tokio::test]
+async fn register_agent_config_registers_agents_and_spawn_uses_them_without_restart() {
+    #[derive(Debug, Deserialize)]
+    struct RegisterAgentConfigResult {
+        agent_types: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let project = tempfile::tempdir().expect("project temp dir");
+    let project_config_dir = project.path().join(".codex");
+    let project_agents_dir = project_config_dir.join("agents");
+    tokio::fs::create_dir_all(&project_agents_dir)
+        .await
+        .expect("project agents dir should be created");
+    tokio::fs::write(
+        project_agents_dir.join("fresh.toml"),
+        r#"developer_instructions = "Use the fresh project role."
+model = "gpt-5.4"
+model_reasoning_effort = "minimal"
+"#,
+    )
+    .await
+    .expect("project role config should be written");
+    tokio::fs::write(
+        project_config_dir.join(CONFIG_TOML_FILE),
+        r#"[agents.fresh]
+description = "Fresh project role"
+config_file = "./agents/fresh.toml"
+"#,
+    )
+    .await
+    .expect("project config should declare the fresh role");
+
+    let mut config = (*turn.config).clone();
+    config.cwd = project.path().abs();
+    #[allow(deprecated)]
+    {
+        turn.cwd = project.path().abs();
+    }
+    turn.config = Arc::new(config);
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let register_output = RegisterAgentConfigHandler
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "register_agent_config",
+            function_payload(json!({
+                "config_path": project_config_dir.join(CONFIG_TOML_FILE),
+            })),
+        ))
+        .await
+        .expect("register_agent_config should load the project config agents");
+    let (register_content, _) = expect_text_output(register_output);
+    let register_result: RegisterAgentConfigResult =
+        serde_json::from_str(&register_content).expect("register result should be json");
+    assert_eq!(register_result.agent_types, vec!["fresh".to_string()]);
+
+    let output = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "agent_type": "fresh"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should reload and use the project role");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let snapshot = manager
+        .get_thread(parse_agent_id(&result.agent_id))
+        .await
+        .expect("spawned agent thread should exist")
+        .config_snapshot()
+        .await;
+
+    assert_eq!(snapshot.model, "gpt-5.4");
+    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Minimal));
+}
+
+#[tokio::test]
+async fn register_agent_config_v2_registers_agents() {
+    #[derive(Debug, Deserialize)]
+    struct RegisterAgentConfigResult {
+        agent_types: Vec<String>,
+    }
+
+    let (session, mut turn) = make_session_and_context().await;
+    let project = tempfile::tempdir().expect("project temp dir");
+    let project_config_dir = project.path().join(".codex");
+    let project_agents_dir = project_config_dir.join("agents");
+    tokio::fs::create_dir_all(&project_agents_dir)
+        .await
+        .expect("project agents dir should be created");
+    tokio::fs::write(
+        project_agents_dir.join("reviewer.toml"),
+        r#"developer_instructions = "Review carefully."
+model = "gpt-5.4"
+"#,
+    )
+    .await
+    .expect("project role config should be written");
+    tokio::fs::write(
+        project_config_dir.join(CONFIG_TOML_FILE),
+        r#"[agents.reviewer]
+description = "Reviewer role"
+config_file = "./agents/reviewer.toml"
+"#,
+    )
+    .await
+    .expect("project config should declare the reviewer role");
+
+    let mut config = (*turn.config).clone();
+    config.cwd = project.path().abs();
+    #[allow(deprecated)]
+    {
+        turn.cwd = project.path().abs();
+    }
+    turn.config = Arc::new(config);
+
+    let output = RegisterAgentConfigHandlerV2
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "register_agent_config",
+            function_payload(json!({
+                "config_path": ".codex/config.toml",
+            })),
+        ))
+        .await
+        .expect("register_agent_config should load relative project config path");
+    let (content, _) = expect_text_output(output);
+    let result: RegisterAgentConfigResult =
+        serde_json::from_str(&content).expect("register result should be json");
+    assert_eq!(result.agent_types, vec!["reviewer".to_string()]);
 }
 
 #[tokio::test]

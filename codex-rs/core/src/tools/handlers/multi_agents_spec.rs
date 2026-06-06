@@ -154,6 +154,44 @@ pub fn create_send_input_tool_v1() -> ToolSpec {
     })
 }
 
+pub fn create_register_agent_config_tool_v1() -> ToolSpec {
+    ToolSpec::Namespace(ResponsesApiNamespace {
+        name: MULTI_AGENT_V1_NAMESPACE.to_string(),
+        description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
+        tools: vec![ResponsesApiNamespaceTool::Function(
+            register_agent_config_tool(),
+        )],
+    })
+}
+
+pub fn create_register_agent_config_tool_v2() -> ToolSpec {
+    ToolSpec::Function(register_agent_config_tool())
+}
+
+fn register_agent_config_tool() -> ResponsesApiTool {
+    let properties = BTreeMap::from([(
+        "config_path".to_string(),
+        JsonSchema::string(Some(
+            "Path to a Codex config.toml file whose agents should be registered. Relative paths resolve against the current working directory."
+                .to_string(),
+        )),
+    )]);
+
+    ResponsesApiTool {
+        name: "register_agent_config".to_string(),
+        description: "Register agent_type definitions from the specified Codex config.toml. Agents with the same name override existing registered definitions. Returns all currently registered agent_type names."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["config_path".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: None,
+    }
+}
+
 pub fn create_send_message_tool() -> ToolSpec {
     let properties = BTreeMap::from([
         (

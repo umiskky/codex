@@ -174,6 +174,7 @@ use uuid::Uuid;
 use crate::client::ModelClient;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::compact::collect_user_messages;
+use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::Constrained;
 use crate::config::ConstraintResult;
@@ -1470,6 +1471,18 @@ impl Session {
             .session_configuration
             .original_config_do_not_use
             .clone()
+    }
+
+    pub(crate) async fn replace_runtime_agent_roles(
+        &self,
+        agent_roles: BTreeMap<String, AgentRoleConfig>,
+        startup_warnings: Vec<String>,
+    ) {
+        let mut state = self.state.lock().await;
+        let mut config = (*state.session_configuration.original_config_do_not_use).clone();
+        config.agent_roles = agent_roles;
+        config.startup_warnings = startup_warnings;
+        state.session_configuration.original_config_do_not_use = Arc::new(config);
     }
 
     pub(crate) async fn provider(&self) -> ModelProviderInfo {

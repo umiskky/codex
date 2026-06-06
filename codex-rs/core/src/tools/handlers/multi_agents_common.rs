@@ -6,8 +6,10 @@ use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::FunctionToolOutput;
+use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
+use crate::tools::handlers::parse_arguments;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
@@ -22,9 +24,11 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Minimum wait timeout to prevent tight polling loops from burning CPU.
 pub(crate) const MIN_WAIT_TIMEOUT_MS: i64 = DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
@@ -324,6 +328,72 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
     }
 
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RegisterAgentConfigArgs {
+    config_path: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RegisterAgentConfigResult {
+    agent_types: Vec<String>,
+}
+
+pub(crate) async fn handle_register_agent_config(
+    invocation: ToolInvocation,
+) -> Result<RegisterAgentConfigResult, FunctionCallError> {
+    let ToolInvocation {
+        session,
+        turn,
+        payload,
+        ..
+    } = invocation;
+    let arguments = function_arguments(payload)?;
+    let args: RegisterAgentConfigArgs = parse_arguments(&arguments)?;
+    let mut config = (*session.get_config().await).clone();
+    #[allow(deprecated)]
+    {
+        config.cwd = turn.cwd.clone();
+    }
+    let config_path = args.config_path;
+    let agent_types = config
+        .register_agent_config(&config_path)
+        .await
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to register agent config `{}`: {err}",
+                config_path.display()
+            ))
+        })?;
+    session
+        .replace_runtime_agent_roles(config.agent_roles, config.startup_warnings)
+        .await;
+    Ok(RegisterAgentConfigResult { agent_types })
+}
+
+pub(crate) async fn sync_registered_agent_roles(session: &Session, config: &mut Config) {
+    config
+        .agent_roles
+        .extend(session.get_config().await.agent_roles.clone());
+}
+
+impl ToolOutput for RegisterAgentConfigResult {
+    fn log_preview(&self) -> String {
+        tool_output_json_text(self, "register_agent_config")
+    }
+
+    fn success_for_logging(&self) -> bool {
+        true
+    }
+
+    fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
+        tool_output_response_item(call_id, payload, self, Some(true), "register_agent_config")
+    }
+
+    fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
+        tool_output_code_mode_result(self, "register_agent_config")
+    }
 }
 
 pub(crate) async fn apply_spawn_agent_service_tier(

@@ -14,18 +14,24 @@ use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::LocalThreadStore;
@@ -53,6 +59,43 @@ async fn test_config_with_cli_overrides(
 
 async fn test_config() -> (TempDir, Config) {
     test_config_with_cli_overrides(Vec::new()).await
+}
+
+#[tokio::test]
+async fn resume_config_uses_latest_rollout_turn_context_model_and_effort() {
+    let (_home, mut config) = test_config().await;
+    config.model = Some("gpt-parent".to_string());
+    config.model_reasoning_effort = Some(ReasoningEffort::High);
+    let cwd = config.cwd.to_path_buf();
+
+    apply_resume_config_from_rollout_history(
+        &mut config,
+        &[RolloutItem::TurnContext(TurnContextItem {
+            turn_id: None,
+            cwd,
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "gpt-child".to_string(),
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            realtime_active: None,
+            effort: Some(ReasoningEffort::Minimal),
+            summary: ReasoningSummary::Auto,
+        })],
+    );
+
+    assert_eq!(config.model.as_deref(), Some("gpt-child"));
+    assert_eq!(
+        config.model_reasoning_effort,
+        Some(ReasoningEffort::Minimal)
+    );
 }
 
 fn text_input(text: &str) -> Op {

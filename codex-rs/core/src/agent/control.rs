@@ -30,6 +30,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
+use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
@@ -604,6 +605,7 @@ impl AgentControl {
         thread_id: ThreadId,
         session_source: SessionSource,
     ) -> CodexResult<ThreadId> {
+        let mut config = config;
         let state = self.upgrade()?;
         let state_db_ctx = state.state_db();
         let stored_thread = state
@@ -617,6 +619,7 @@ impl AgentControl {
             .history
             .ok_or_else(|| CodexErr::ThreadNotFound(thread_id))?
             .items;
+        apply_resume_config_from_rollout_history(&mut config, &history);
         let initial_history = InitialHistory::Resumed(ResumedHistory {
             conversation_id: thread_id,
             history,
@@ -1338,6 +1341,23 @@ fn thread_spawn_depth(session_source: &SessionSource) -> Option<i32> {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) => Some(*depth),
         _ => None,
     }
+}
+
+fn apply_resume_config_from_rollout_history(config: &mut Config, history: &[RolloutItem]) {
+    let Some(turn_context) = history.iter().rev().find_map(|item| match item {
+        RolloutItem::TurnContext(turn_context) => Some(turn_context),
+        _ => None,
+    }) else {
+        return;
+    };
+    apply_resume_config_from_turn_context(config, turn_context);
+}
+
+fn apply_resume_config_from_turn_context(config: &mut Config, turn_context: &TurnContextItem) {
+    config.model = Some(turn_context.model.clone());
+    config.model_reasoning_effort = turn_context
+        .effort
+        .or_else(|| turn_context.collaboration_mode.as_ref()?.reasoning_effort());
 }
 #[cfg(test)]
 #[path = "control_tests.rs"]

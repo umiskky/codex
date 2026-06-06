@@ -31,6 +31,7 @@ use crate::tools::handlers::agent_jobs::ReportAgentJobResultHandler;
 use crate::tools::handlers::agent_jobs::SpawnAgentsOnCsvHandler;
 use crate::tools::handlers::extension_tools::ExtensionToolAdapter;
 use crate::tools::handlers::multi_agents::CloseAgentHandler;
+use crate::tools::handlers::multi_agents::RegisterAgentConfigHandler;
 use crate::tools::handlers::multi_agents::ResumeAgentHandler;
 use crate::tools::handlers::multi_agents::SendInputHandler;
 use crate::tools::handlers::multi_agents::SpawnAgentHandler;
@@ -43,6 +44,7 @@ use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
+use crate::tools::handlers::multi_agents_v2::RegisterAgentConfigHandler as RegisterAgentConfigHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
@@ -721,6 +723,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                 multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace),
                 exposure,
             ));
+            planned_tools.add_arc(override_tool_exposure(
+                multi_agent_v2_handler(RegisterAgentConfigHandlerV2, tool_namespace),
+                exposure,
+            ));
         } else {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
@@ -751,6 +757,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
             planned_tools
                 .add_with_exposure(WaitAgentHandler::new(context.wait_agent_timeouts), exposure);
             planned_tools.add_with_exposure(CloseAgentHandler, exposure);
+            planned_tools.add_with_exposure(RegisterAgentConfigHandler, exposure);
         }
     }
 

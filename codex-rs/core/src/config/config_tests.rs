@@ -6821,6 +6821,80 @@ nickname_candidates = ["Hypatia", "Noether"]
 }
 
 #[tokio::test]
+async fn register_agent_config_loads_agents_from_config_toml_and_overrides_existing()
+-> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let old_role_config_path = codex_home.path().join("old").join("researcher.toml");
+    tokio::fs::create_dir_all(
+        old_role_config_path
+            .parent()
+            .expect("old role config should have a parent directory"),
+    )
+    .await?;
+    tokio::fs::write(
+        &old_role_config_path,
+        "developer_instructions = \"Old role\"\nmodel = \"gpt-4.1\"",
+    )
+    .await?;
+    tokio::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"[agents.researcher]
+description = "Old research role"
+config_file = "./old/researcher.toml"
+"#,
+    )
+    .await?;
+    let mut config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    let project = TempDir::new()?;
+    let project_config_dir = project.path().join(".codex");
+    let new_role_config_path = project_config_dir.join("agents").join("researcher.toml");
+    tokio::fs::create_dir_all(
+        new_role_config_path
+            .parent()
+            .expect("new role config should have a parent directory"),
+    )
+    .await?;
+    tokio::fs::write(
+        &new_role_config_path,
+        r#"
+description = "New research role"
+nickname_candidates = ["Curie"]
+developer_instructions = "New role"
+model = "gpt-5.4"
+"#,
+    )
+    .await?;
+    tokio::fs::write(
+        project_config_dir.join(CONFIG_TOML_FILE),
+        r#"[agents.researcher]
+description = "Config metadata should be replaced by file metadata"
+config_file = "./agents/researcher.toml"
+"#,
+    )
+    .await?;
+
+    let agent_types = config
+        .register_agent_config(project_config_dir.join(CONFIG_TOML_FILE))
+        .await?;
+    assert_eq!(agent_types, vec!["researcher".to_string()]);
+    assert_eq!(
+        config.agent_roles.get("researcher"),
+        Some(&AgentRoleConfig {
+            description: Some("New research role".to_string()),
+            config_file: Some(new_role_config_path),
+            nickname_candidates: Some(vec!["Curie".to_string()]),
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn agent_role_relative_config_file_resolves_from_config_layer() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let role_config_path = codex_home.path().join("agents").join("researcher.toml");
@@ -9857,7 +9931,7 @@ non_code_mode_only = true
         config.multi_agent_v2.tool_namespace.as_deref(),
         Some("agents")
     );
-    assert!(config.multi_agent_v2.hide_spawn_agent_metadata);
+    assert!(!config.multi_agent_v2.hide_spawn_agent_metadata);
     assert!(config.multi_agent_v2.non_code_mode_only);
 
     Ok(())
@@ -9914,7 +9988,7 @@ enabled = true
             .unwrap_or_default()
             .contains("maximum concurrency"),
     );
-    assert!(config.multi_agent_v2.hide_spawn_agent_metadata);
+    assert!(!config.multi_agent_v2.hide_spawn_agent_metadata);
     assert!(config.multi_agent_v2.non_code_mode_only);
 
     Ok(())

@@ -1065,7 +1065,7 @@ impl Default for MultiAgentV2Config {
                 DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT.to_string(),
             ),
             tool_namespace: None,
-            hide_spawn_agent_metadata: true,
+            hide_spawn_agent_metadata: false,
             non_code_mode_only: true,
         }
     }
@@ -1433,6 +1433,38 @@ impl Config {
 
     pub(crate) fn prefix_mcp_tool_names(&self) -> bool {
         !self.features.enabled(Feature::NonPrefixedMcpToolNames)
+    }
+
+    pub(crate) async fn register_agent_config(
+        &mut self,
+        config_path: impl AsRef<Path>,
+    ) -> std::io::Result<Vec<String>> {
+        let config_path = self.resolve_agent_config_path(config_path.as_ref())?;
+        let mut startup_warnings = Vec::new();
+        let agent_roles = agent_roles::load_agent_roles_from_config_file(
+            LOCAL_FS.as_ref(),
+            &config_path,
+            &mut startup_warnings,
+        )
+        .await?;
+        self.startup_warnings.extend(startup_warnings);
+        self.agent_roles.extend(agent_roles);
+        Ok(self.registered_agent_types())
+    }
+
+    pub(crate) fn registered_agent_types(&self) -> Vec<String> {
+        self.agent_roles.keys().cloned().collect()
+    }
+
+    fn resolve_agent_config_path(&self, config_path: &Path) -> std::io::Result<AbsolutePathBuf> {
+        if config_path.is_absolute() {
+            AbsolutePathBuf::from_absolute_path(config_path)
+        } else {
+            Ok(AbsolutePathBuf::resolve_path_against_base(
+                config_path,
+                self.cwd.as_path(),
+            ))
+        }
     }
 
     pub async fn rebuild_preserving_session_layers(
