@@ -1,10 +1,14 @@
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use rand::prelude::IndexedRandom;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -44,10 +48,15 @@ pub(crate) struct AgentMetadata {
     pub(crate) last_task_message: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AgentConfigMetadata {
     pub(crate) model: String,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) approval_policy: AskForApproval,
+    pub(crate) permission_profile: PermissionProfile,
+    pub(crate) cwd: AbsolutePathBuf,
+    pub(crate) workspace_roots: Vec<AbsolutePathBuf>,
+    pub(crate) shell_environment_policy: ShellEnvironmentPolicy,
 }
 
 fn format_agent_nickname(name: &str, nickname_reset_count: usize) -> String {
@@ -172,8 +181,7 @@ impl AgentRegistry {
     pub(crate) fn update_known_agent_config(
         &self,
         thread_id: ThreadId,
-        model: String,
-        reasoning_effort: Option<ReasoningEffort>,
+        snapshot: &crate::codex_thread::ThreadConfigSnapshot,
     ) {
         self.active_agents
             .lock()
@@ -182,8 +190,13 @@ impl AgentRegistry {
             .insert(
                 thread_id,
                 AgentConfigMetadata {
-                    model,
-                    reasoning_effort,
+                    model: snapshot.model.clone(),
+                    reasoning_effort: snapshot.reasoning_effort,
+                    approval_policy: snapshot.approval_policy,
+                    permission_profile: snapshot.permission_profile.clone(),
+                    cwd: snapshot.cwd.clone(),
+                    workspace_roots: snapshot.workspace_roots.clone(),
+                    shell_environment_policy: snapshot.shell_environment_policy.clone(),
                 },
             );
     }

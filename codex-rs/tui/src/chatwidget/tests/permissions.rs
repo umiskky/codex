@@ -993,6 +993,43 @@ async fn permissions_selection_marks_auto_review_current_with_custom_workspace_w
 }
 
 #[tokio::test]
+async fn permissions_selection_shows_custom_current_when_no_builtin_preset_matches() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.notices.hide_full_access_warning = Some(true);
+
+    chat.handle_thread_session(crate::session_state::ThreadSessionState {
+        thread_id: ThreadId::new(),
+        forked_from_id: None,
+        fork_parent_title: None,
+        thread_name: None,
+        model: "gpt-test".to_string(),
+        model_provider_id: "test-provider".to_string(),
+        service_tier: None,
+        approval_policy: AskForApproval::Never,
+        approvals_reviewer: ApprovalsReviewer::User,
+        permission_profile: PermissionProfile::read_only(),
+        active_permission_profile: None,
+        cwd: test_project_path().abs(),
+        runtime_workspace_roots: Vec::new(),
+        instruction_source_paths: Vec::new(),
+        reasoning_effort: None,
+        collaboration_mode: None,
+        personality: None,
+        message_history: None,
+        network_proxy: None,
+        rollout_path: Some(PathBuf::new()),
+    });
+
+    chat.open_permissions_popup();
+    let popup = render_bottom_popup(&chat, /*width*/ 120);
+
+    assert!(
+        popup.contains("Custom permissions (current)"),
+        "expected custom current row when no built-in preset matches: {popup}"
+    );
+}
+
+#[tokio::test]
 async fn permissions_selection_can_disable_auto_review() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     #[cfg(target_os = "windows")]

@@ -1,4 +1,5 @@
 use crate::agent::AgentStatus;
+use crate::agent::registry::AgentConfigMetadata;
 use crate::agent::registry::AgentMetadata;
 use crate::agent::registry::AgentRegistry;
 use crate::agent::role::DEFAULT_ROLE_NAME;
@@ -6,6 +7,7 @@ use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
+use crate::config::PermissionProfileSnapshot;
 use crate::session::emit_subagent_session_started;
 use crate::session_prefix::format_subagent_context_line;
 use crate::session_prefix::format_subagent_notification_message;
@@ -13,6 +15,7 @@ use crate::shell_snapshot::ShellSnapshot;
 use crate::thread_manager::ResumeThreadWithHistoryOptions;
 use crate::thread_manager::ThreadManagerState;
 use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
+use codex_config::Constrained;
 use codex_protocol::AgentPath;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
@@ -34,7 +37,10 @@ use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
+use codex_state::ThreadMetadata as StateThreadMetadata;
 use codex_thread_store::ReadThreadParams;
+use codex_thread_store::ThreadMetadataPatch;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -58,6 +64,34 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_mode: Option<SpawnAgentForkMode>,
     pub(crate) parent_thread_id: Option<ThreadId>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResumeAgentScope {
+    SelfOnly,
+    Subtree,
+    AllDescendants,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResumeConfigRestoreMode {
+    ModelOnly,
+    FullRuntime,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResumeAgentOptions {
+    pub(crate) scope: ResumeAgentScope,
+    pub(crate) config_restore_mode: ResumeConfigRestoreMode,
+}
+
+impl Default for ResumeAgentOptions {
+    fn default() -> Self {
+        Self {
+            scope: ResumeAgentScope::Subtree,
+            config_restore_mode: ResumeConfigRestoreMode::ModelOnly,
+        }
+    }
 }
 
 struct SpawnAgentThreadInheritance {
@@ -300,11 +334,8 @@ impl AgentControl {
         agent_metadata.agent_id = Some(new_thread.thread_id);
         reservation.commit(agent_metadata.clone());
         let thread_config = new_thread.thread.codex.thread_config_snapshot().await;
-        self.state.update_known_agent_config(
-            new_thread.thread_id,
-            thread_config.model.clone(),
-            thread_config.reasoning_effort,
-        );
+        self.state
+            .update_known_agent_config(new_thread.thread_id, &thread_config);
 
         if let Some(SessionSource::SubAgent(
             subagent_source @ SubAgentSource::ThreadSpawn {
@@ -361,8 +392,29 @@ impl AgentControl {
         )
         .await;
 
+        let initial_task_preview = render_input_preview(&initial_operation);
         self.send_input(new_thread.thread_id, initial_operation)
             .await?;
+        if !initial_task_preview.trim().is_empty()
+            && let Err(err) = new_thread
+                .thread
+                .update_thread_metadata(
+                    ThreadMetadataPatch {
+                        preview: Some(initial_task_preview.clone()),
+                        title: Some(initial_task_preview.clone()),
+                        first_user_message: Some(initial_task_preview),
+                        ..Default::default()
+                    },
+                    /*include_archived*/ false,
+                )
+                .await
+        {
+            warn!(
+                error = %err,
+                thread_id = %new_thread.thread_id,
+                "failed to persist spawned agent initial task metadata"
+            );
+        }
         if multi_agent_version != MultiAgentVersion::V2 {
             let child_reference = agent_metadata
                 .agent_path
@@ -535,13 +587,33 @@ impl AgentControl {
         thread_id: ThreadId,
         session_source: SessionSource,
     ) -> CodexResult<ThreadId> {
+        self.resume_agent_from_rollout_with_options(
+            config,
+            thread_id,
+            session_source,
+            ResumeAgentOptions::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn resume_agent_from_rollout_with_options(
+        &self,
+        config: Config,
+        thread_id: ThreadId,
+        session_source: SessionSource,
+        options: ResumeAgentOptions,
+    ) -> CodexResult<ThreadId> {
         let root_depth = thread_spawn_depth(&session_source).unwrap_or(0);
         let resumed_thread_id = Box::pin(self.resume_single_agent_from_rollout(
             config.clone(),
             thread_id,
             session_source,
+            options.config_restore_mode,
         ))
         .await?;
+        if options.scope == ResumeAgentScope::SelfOnly {
+            return Ok(resumed_thread_id);
+        }
         let state = self.upgrade()?;
         let Ok(resumed_thread) = state.get_thread(resumed_thread_id).await else {
             return Ok(resumed_thread_id);
@@ -552,13 +624,22 @@ impl AgentControl {
 
         let mut resume_queue = VecDeque::from([(thread_id, root_depth)]);
         while let Some((parent_thread_id, parent_depth)) = resume_queue.pop_front() {
-            let child_ids = match state_db_ctx
-                .list_thread_spawn_children_with_status(
-                    parent_thread_id,
-                    DirectionalThreadSpawnEdgeStatus::Open,
-                )
-                .await
-            {
+            let child_ids = match match options.scope {
+                ResumeAgentScope::Subtree => {
+                    state_db_ctx
+                        .list_thread_spawn_children_with_status(
+                            parent_thread_id,
+                            DirectionalThreadSpawnEdgeStatus::Open,
+                        )
+                        .await
+                }
+                ResumeAgentScope::AllDescendants => {
+                    state_db_ctx
+                        .list_thread_spawn_children(parent_thread_id)
+                        .await
+                }
+                ResumeAgentScope::SelfOnly => unreachable!("self-only returned above"),
+            } {
                 Ok(child_ids) => child_ids,
                 Err(err) => {
                     warn!(
@@ -573,11 +654,18 @@ impl AgentControl {
                 let child_resumed = if state.get_thread(child_thread_id).await.is_ok() {
                     true
                 } else {
+                    let child_agent_path = match state_db_ctx.get_thread(child_thread_id).await {
+                        Ok(Some(metadata)) => metadata
+                            .agent_path
+                            .as_deref()
+                            .and_then(|agent_path| AgentPath::try_from(agent_path).ok()),
+                        Ok(None) | Err(_) => None,
+                    };
                     let child_session_source =
                         SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                             parent_thread_id,
                             depth: child_depth,
-                            agent_path: None,
+                            agent_path: child_agent_path,
                             agent_nickname: None,
                             agent_role: None,
                         });
@@ -585,6 +673,7 @@ impl AgentControl {
                         config.clone(),
                         child_thread_id,
                         child_session_source,
+                        options.config_restore_mode,
                     ))
                     .await
                     {
@@ -604,11 +693,75 @@ impl AgentControl {
         Ok(resumed_thread_id)
     }
 
+    pub(crate) async fn resume_agent_descendants_from_rollout(
+        &self,
+        config: Config,
+        root_thread_id: ThreadId,
+        root_depth: i32,
+        config_restore_mode: ResumeConfigRestoreMode,
+    ) -> CodexResult<Vec<ThreadId>> {
+        let state = self.upgrade()?;
+        let Some(state_db_ctx) = state.state_db() else {
+            return Ok(Vec::new());
+        };
+
+        let mut resumed = Vec::new();
+        let mut resume_queue = VecDeque::from([(root_thread_id, root_depth)]);
+        while let Some((parent_thread_id, parent_depth)) = resume_queue.pop_front() {
+            let child_ids = state_db_ctx
+                .list_thread_spawn_children(parent_thread_id)
+                .await
+                .map_err(|err| {
+                    CodexErr::Fatal(format!(
+                        "failed to load persisted thread-spawn children for {parent_thread_id}: {err}"
+                    ))
+                })?;
+
+            for child_thread_id in child_ids {
+                let child_depth = parent_depth + 1;
+                if state.get_thread(child_thread_id).await.is_err() {
+                    let child_agent_path = match state_db_ctx.get_thread(child_thread_id).await {
+                        Ok(Some(metadata)) => metadata
+                            .agent_path
+                            .as_deref()
+                            .and_then(|agent_path| AgentPath::try_from(agent_path).ok()),
+                        Ok(None) | Err(_) => None,
+                    };
+                    let child_session_source =
+                        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                            parent_thread_id,
+                            depth: child_depth,
+                            agent_path: child_agent_path,
+                            agent_nickname: None,
+                            agent_role: None,
+                        });
+                    match Box::pin(self.resume_single_agent_from_rollout(
+                        config.clone(),
+                        child_thread_id,
+                        child_session_source,
+                        config_restore_mode,
+                    ))
+                    .await
+                    {
+                        Ok(_) => resumed.push(child_thread_id),
+                        Err(err) => {
+                            warn!("failed to resume descendant thread {child_thread_id}: {err}");
+                        }
+                    }
+                }
+                resume_queue.push_back((child_thread_id, child_depth));
+            }
+        }
+
+        Ok(resumed)
+    }
+
     async fn resume_single_agent_from_rollout(
         &self,
         config: Config,
         thread_id: ThreadId,
         session_source: SessionSource,
+        config_restore_mode: ResumeConfigRestoreMode,
     ) -> CodexResult<ThreadId> {
         let mut config = config;
         let state = self.upgrade()?;
@@ -624,18 +777,33 @@ impl AgentControl {
             .history
             .ok_or_else(|| CodexErr::ThreadNotFound(thread_id))?
             .items;
-        if !apply_resume_config_from_rollout_history(&mut config, &history)
-            && let Some(known_config) = self.state.known_agent_config(thread_id)
-        {
-            config.model = Some(known_config.model);
-            config.model_reasoning_effort = known_config.reasoning_effort;
+        let restored_from_rollout = apply_resume_config_from_rollout_history_with_mode(
+            &mut config,
+            &history,
+            config_restore_mode,
+        );
+        if let Some(known_config) = self.state.known_agent_config(thread_id) {
+            if restored_from_rollout {
+                if config_restore_mode == ResumeConfigRestoreMode::FullRuntime {
+                    config.permissions.shell_environment_policy =
+                        known_config.shell_environment_policy.clone();
+                }
+            } else {
+                apply_known_agent_config(&mut config, &known_config, config_restore_mode);
+            }
         }
+        let stored_parent_thread_id = stored_thread.parent_thread_id;
+        let stored_agent_path = stored_thread
+            .agent_path
+            .as_deref()
+            .and_then(|agent_path| AgentPath::try_from(agent_path).ok());
         let initial_history = InitialHistory::Resumed(ResumedHistory {
             conversation_id: thread_id,
             history,
             rollout_path: stored_thread.rollout_path,
         });
-        let parent_thread_id = stored_thread.parent_thread_id;
+        let parent_thread_id =
+            stored_parent_thread_id.or_else(|| session_source.parent_thread_id());
         let multi_agent_version = state
             .effective_multi_agent_version_for_spawn(
                 &initial_history,
@@ -657,6 +825,8 @@ impl AgentControl {
                 agent_role: _,
                 agent_nickname: _,
             }) => {
+                let parent_thread_id = stored_parent_thread_id.unwrap_or(parent_thread_id);
+                let agent_path = agent_path.or_else(|| stored_agent_path.clone());
                 let (resumed_agent_nickname, resumed_agent_role) =
                     if let Some(state_db_ctx) = state_db_ctx.as_ref() {
                         match state_db_ctx.get_thread(thread_id).await {
@@ -701,11 +871,8 @@ impl AgentControl {
         agent_metadata.agent_id = Some(resumed_thread.thread_id);
         reservation.commit(agent_metadata.clone());
         let thread_config = resumed_thread.thread.config_snapshot().await;
-        self.state.update_known_agent_config(
-            resumed_thread.thread_id,
-            thread_config.model,
-            thread_config.reasoning_effort,
-        );
+        self.state
+            .update_known_agent_config(resumed_thread.thread_id, &thread_config);
         // Resumed threads are re-registered in-memory and need the same listener
         // attachment path as freshly spawned threads.
         state.notify_thread_created(resumed_thread.thread_id);
@@ -802,11 +969,8 @@ impl AgentControl {
         let state = self.upgrade()?;
         let result = if let Ok(thread) = state.get_thread(agent_id).await {
             let config_snapshot = thread.config_snapshot().await;
-            self.state.update_known_agent_config(
-                agent_id,
-                config_snapshot.model,
-                config_snapshot.reasoning_effort,
-            );
+            self.state
+                .update_known_agent_config(agent_id, &config_snapshot);
             thread.codex.session.ensure_rollout_materialized().await;
             thread.codex.session.flush_rollout().await?;
             let result = if matches!(thread.agent_status().await, AgentStatus::Shutdown) {
@@ -1095,6 +1259,41 @@ impl AgentControl {
         }
 
         Ok(agents)
+    }
+
+    pub(crate) async fn list_stored_agent_threads(
+        &self,
+        current_thread_id: ThreadId,
+    ) -> CodexResult<Vec<StateThreadMetadata>> {
+        let state = self.upgrade()?;
+        let root_thread_id = self
+            .state
+            .agent_id_for_path(&AgentPath::root())
+            .unwrap_or(current_thread_id);
+        let Some(state_db_ctx) = state.state_db() else {
+            return Err(CodexErr::UnsupportedOperation(
+                "state db unavailable for historical agent listing".to_string(),
+            ));
+        };
+        let thread_ids = state_db_ctx
+            .list_thread_spawn_descendants(root_thread_id)
+            .await
+            .map_err(|err| {
+                CodexErr::Fatal(format!("failed to list stored agent descendants: {err}"))
+            })?;
+        let mut threads = Vec::with_capacity(thread_ids.len());
+        for thread_id in thread_ids {
+            match state_db_ctx.get_thread(thread_id).await {
+                Ok(Some(metadata)) => threads.push(metadata),
+                Ok(None) => {}
+                Err(err) => {
+                    return Err(CodexErr::Fatal(format!(
+                        "failed to load stored agent thread {thread_id}: {err}"
+                    )));
+                }
+            }
+        }
+        Ok(threads)
     }
 
     /// Starts a detached watcher for sub-agents spawned from another thread.
@@ -1404,23 +1603,89 @@ fn thread_spawn_depth(session_source: &SessionSource) -> Option<i32> {
     }
 }
 
+#[cfg(test)]
 fn apply_resume_config_from_rollout_history(config: &mut Config, history: &[RolloutItem]) -> bool {
+    apply_resume_config_from_rollout_history_with_mode(
+        config,
+        history,
+        ResumeConfigRestoreMode::ModelOnly,
+    )
+}
+
+fn apply_resume_config_from_rollout_history_with_mode(
+    config: &mut Config,
+    history: &[RolloutItem],
+    config_restore_mode: ResumeConfigRestoreMode,
+) -> bool {
     let Some(turn_context) = history.iter().rev().find_map(|item| match item {
         RolloutItem::TurnContext(turn_context) => Some(turn_context),
         _ => None,
     }) else {
         return false;
     };
-    apply_resume_config_from_turn_context(config, turn_context);
+    apply_resume_config_from_turn_context(config, turn_context, config_restore_mode);
     true
 }
 
-fn apply_resume_config_from_turn_context(config: &mut Config, turn_context: &TurnContextItem) {
+fn apply_resume_config_from_turn_context(
+    config: &mut Config,
+    turn_context: &TurnContextItem,
+    config_restore_mode: ResumeConfigRestoreMode,
+) {
     config.model = Some(turn_context.model.clone());
     config.model_reasoning_effort = turn_context
         .effort
         .or_else(|| turn_context.collaboration_mode.as_ref()?.reasoning_effort());
+    if config_restore_mode != ResumeConfigRestoreMode::FullRuntime {
+        return;
+    }
+
+    if let Ok(cwd) = AbsolutePathBuf::try_from(turn_context.cwd.clone()) {
+        config.cwd = cwd;
+    }
+    if let Some(workspace_roots) = turn_context.workspace_roots.clone() {
+        config.workspace_roots = workspace_roots.clone();
+        config.permissions.set_workspace_roots(workspace_roots);
+    }
+    config.permissions.approval_policy = Constrained::allow_only(turn_context.approval_policy);
+    if let Err(err) = config
+        .permissions
+        .replace_permission_profile_from_session_snapshot(PermissionProfileSnapshot::legacy(
+            turn_context.permission_profile(),
+        ))
+    {
+        warn!("failed to restore child permission profile from rollout: {err}");
+    }
 }
+
+fn apply_known_agent_config(
+    config: &mut Config,
+    known_config: &AgentConfigMetadata,
+    config_restore_mode: ResumeConfigRestoreMode,
+) {
+    config.model = Some(known_config.model.clone());
+    config.model_reasoning_effort = known_config.reasoning_effort;
+    if config_restore_mode != ResumeConfigRestoreMode::FullRuntime {
+        return;
+    }
+
+    config.cwd = known_config.cwd.clone();
+    config.workspace_roots = known_config.workspace_roots.clone();
+    config
+        .permissions
+        .set_workspace_roots(known_config.workspace_roots.clone());
+    config.permissions.shell_environment_policy = known_config.shell_environment_policy.clone();
+    config.permissions.approval_policy = Constrained::allow_only(known_config.approval_policy);
+    if let Err(err) = config
+        .permissions
+        .replace_permission_profile_from_session_snapshot(PermissionProfileSnapshot::legacy(
+            known_config.permission_profile.clone(),
+        ))
+    {
+        warn!("failed to restore known child permission profile: {err}");
+    }
+}
+
 #[cfg(test)]
 #[path = "control_tests.rs"]
 mod tests;

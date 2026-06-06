@@ -138,8 +138,27 @@ pub(crate) enum KeymapEditIntent {
 pub(crate) enum AppEvent {
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
+    /// Open recoverable historical subagents that are not loaded in this session.
+    OpenAgentResumePicker,
+    /// Open the registered-agent picker for spawning a new subagent.
+    OpenAgentNewPicker,
+    /// Prompt for task name and initial message after selecting an agent type.
+    OpenAgentNewParamsPrompt {
+        parent_thread_id: ThreadId,
+        agent_type: Option<String>,
+    },
+    /// Spawn a new subagent from `/agent new` interactive input.
+    SpawnAgentFromPrompt {
+        parent_thread_id: ThreadId,
+        agent_type: Option<String>,
+        prompt: String,
+    },
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
+    /// Resume one historical subagent into the current TUI session.
+    ResumeAgentThread(ThreadId),
+    /// Resume every historical subagent currently recoverable under the primary thread.
+    ResumeAllRecoverableAgents,
 
     /// Fork the current thread into a transient side conversation.
     StartSide {

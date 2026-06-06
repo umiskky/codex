@@ -330,6 +330,20 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
     Ok(())
 }
 
+pub(crate) fn fill_missing_spawn_agent_model_runtime_defaults(
+    config: &mut Config,
+    turn: &TurnContext,
+) {
+    if config.model.is_none() {
+        config.model = Some(turn.model_info.slug.clone());
+    }
+    if config.model_reasoning_effort.is_none() {
+        config.model_reasoning_effort = turn
+            .reasoning_effort
+            .or(turn.model_info.default_reasoning_level);
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct RegisterAgentArgs {
     agent_config_paths: Vec<PathBuf>,

@@ -43,12 +43,82 @@ canonical task paths, `agent_type`, `model`, `reasoning_effort`, `service_tier`,
 `agent_type` is resolved from registered agent role definitions and applied to the child
 agent config, including role-specific model and reasoning settings.
 
+For codexx, the child role/config wins over the parent session's current runtime
+permissions and scope. If a role TOML sets `approval_policy`, `sandbox_mode`,
+`permissions`, `default_permissions`, `shell_environment_policy`, `cwd`, or workspace
+roots, those child values are kept unless the role omits them. Official v1/v2 spawn
+handlers keep their compatibility behavior.
+
 ### `codexx_multi_agent.resume_agent`
 
-The custom resume tool accepts agent id, task name, or canonical task path. It resumes the
-target child using the original child model and reasoning settings instead of falling back
-to the parent session's current model or reasoning effort. When rollout turn-context data
-is not available, codexx uses the last known child config snapshot as a fallback.
+The custom resume tool accepts agent id, task name, or canonical task path. It also accepts
+`thread_id`, `task_name`, and `agent_path` as explicit target fields. If no target is
+provided, it returns the same historical agent table as `list_agents` with
+`selection_required = true`, so callers can choose a concrete agent and call resume again.
+
+`resume_scope` controls how much of the previous agent tree is restored:
+
+- `"self"` restores only the requested agent and is the codexx default.
+- `"subtree"` restores the requested agent plus stored open descendants.
+- `"all"` restores all historical descendants under the target path. This is intended for
+  restoring every previous child under `/root`.
+
+Codexx resume restores the child thread's original runtime config instead of falling back
+to the parent session. This includes model, reasoning effort, approval policy, permission
+profile, cwd, and workspace roots from rollout turn context. When a live child config
+snapshot is available, codexx also restores `shell_environment_policy`; rollout turn
+context does not currently persist that field. When rollout turn-context data is not
+available, codexx uses the last known child config snapshot as a fallback. Restored
+descendants keep their canonical agent paths.
+
+### `codexx_multi_agent.list_agents`
+
+The custom list tool reads the state DB, not just live in-memory agents. With no filters it
+lists historical sub-agents under the current root session and returns both structured rows
+and an ASCII table.
+
+Supported filters:
+
+- `thread_id`
+- `task_name`
+- `agent_path`
+- `query`
+- `limit`
+
+Rows include task name, canonical agent path, thread id, agent type, nickname, live status,
+and a short summary. Spawned agents write their initial task message into thread metadata,
+so historical lists have a useful summary even before the child produces a later turn.
+
+## TUI `/agent` Changes
+
+Codexx keeps the regular `/agent` picker focused on agents already loaded in the current
+TUI session. It no longer mixes in every historical subagent by default.
+
+Additional commands:
+
+- `/agent resume` lists recoverable historical subagents that are not loaded in the current
+  TUI session. Rows include task name, canonical path, thread id prefix, role/nickname, and
+  a short summary.
+- `/agent resume --all` restores all recoverable historical subagents under the current root
+  session.
+- `/agent new` opens an interactive flow. First choose a registered `agent_type`, then enter
+  `task_name -- initial message`.
+
+The TUI asks the app-server for runtime agent roles from the active parent thread, so roles
+registered after startup through `codexx_multi_agent.register_agent` are available without
+restarting. The supporting app-server methods are internal codexx plumbing:
+
+- `agent/list_roles`
+- `agent/spawn`
+
+When the TUI attaches to spawned or resumed child threads, it now requests resume without
+passing parent permission/model overrides and derives the visible permission state from the
+app-server response. This keeps child permissions aligned with the child thread config.
+The permissions popup also shows a `Custom permissions (current)` row when a child config
+does not match one of the built-in presets.
+
+Session exit resume hints use the running binary name. When the installed command is
+`codexx`, the hint is shown as `codexx resume ...`.
 
 ### Runtime Agent Registration
 
@@ -127,6 +197,16 @@ so model, directory, and permissions lines remain readable.
 Focused verification commands used for this branch:
 
 ```bash
-CARGO_BUILD_JOBS=3 cargo test -p codex-core codexx_ -- --nocapture
-CARGO_BUILD_JOBS=3 cargo test -p codex-tui session_header_ -- --nocapture
+cargo check -p codex-core
+CARGO_BUILD_JOBS=3 cargo check -p codex-app-server
+CARGO_BUILD_JOBS=3 cargo check -p codex-tui
+RUST_MIN_STACK=8388608 CARGO_BUILD_JOBS=3 cargo nextest run -p codex-core codexx_
+CARGO_BUILD_JOBS=3 cargo test -p codex-tui parse_agent_new_prompt_requires_task_and_message
+CARGO_BUILD_JOBS=3 cargo test -p codex-tui permissions_selection_shows_custom_current_when_no_builtin_preset_matches
+CARGO_BUILD_JOBS=3 cargo test -p codex-tui embedded_thread_response_uses_response_sandbox_profile
+CARGO_BUILD_JOBS=3 cargo test -p codex-utils-cli resume_hint_can_use_codexx_binary_name
 ```
+
+The `codexx_` filter currently covers runtime agent registration, spawn permission
+override, historical list/filter output, resume model/reasoning/runtime config restore,
+resume self/subtree/all behavior, final-status waiting, and the default codexx tool surface.

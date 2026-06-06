@@ -29,6 +29,7 @@ use crate::tools::handlers::ViewImageHandler;
 use crate::tools::handlers::WriteStdinHandler;
 use crate::tools::handlers::agent_jobs::ReportAgentJobResultHandler;
 use crate::tools::handlers::agent_jobs::SpawnAgentsOnCsvHandler;
+use crate::tools::handlers::codexx_multi_agent::ListAgentsHandler as CodexxListAgentsHandler;
 use crate::tools::handlers::codexx_multi_agent::RegisterAgentHandler as CodexxRegisterAgentHandler;
 use crate::tools::handlers::codexx_multi_agent::ResumeAgentHandler as CodexxResumeAgentHandler;
 use crate::tools::handlers::codexx_multi_agent::SpawnAgentHandler as CodexxSpawnAgentHandler;
@@ -814,10 +815,7 @@ fn add_codexx_multi_agent_tools(
         CloseAgentHandlerV2,
         Some(crate::tools::handlers::multi_agents_spec::CODEXX_MULTI_AGENT_NAMESPACE),
     ));
-    planned_tools.add_arc(multi_agent_v2_handler(
-        ListAgentsHandlerV2,
-        Some(crate::tools::handlers::multi_agents_spec::CODEXX_MULTI_AGENT_NAMESPACE),
-    ));
+    planned_tools.add(CodexxListAgentsHandler);
 }
 
 fn add_mcp_runtime_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {

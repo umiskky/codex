@@ -42,3 +42,13 @@ mod message_tool;
 mod send_message;
 mod spawn;
 pub(crate) mod wait;
+
+pub(crate) async fn spawn_codexx_agent_from_invocation(
+    invocation: ToolInvocation,
+) -> Result<spawn::SpawnAgentResult, FunctionCallError> {
+    spawn::handle_spawn_agent(
+        invocation, /*sync_runtime_agent_roles_for_spawn*/ true,
+        /*reapply_parent_runtime_after_role*/ false,
+    )
+    .await
+}

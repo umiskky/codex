@@ -69,16 +69,19 @@ async fn apply_role_to_config_inner(
     {
         return Ok(());
     }
+    let agent_roles = config.agent_roles.clone();
     let preserve_current_provider = role_layer_toml.get("model_provider").is_none();
     let preserve_current_service_tier = role_layer_toml.get("service_tier").is_none();
 
-    *config = reload::build_next_config(
+    let mut next_config = reload::build_next_config(
         config,
         role_layer_toml,
         preserve_current_provider,
         preserve_current_service_tier,
     )
     .await?;
+    next_config.agent_roles.extend(agent_roles);
+    *config = next_config;
     Ok(())
 }
 

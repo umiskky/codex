@@ -448,6 +448,16 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadStartResponse,
     },
+    AgentSpawn => "agent/spawn" {
+        params: v2::AgentSpawnParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AgentSpawnResponse,
+    },
+    AgentListRoles => "agent/list_roles" {
+        params: v2::AgentListRolesParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AgentListRolesResponse,
+    },
     ThreadResume => "thread/resume" {
         params: v2::ThreadResumeParams,
         inspect_params: true,

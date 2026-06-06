@@ -16,6 +16,11 @@ use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::Account;
+use codex_app_server_protocol::AgentListRolesParams;
+use codex_app_server_protocol::AgentListRolesResponse;
+use codex_app_server_protocol::AgentRoleSummary;
+use codex_app_server_protocol::AgentSpawnParams;
+use codex_app_server_protocol::AgentSpawnResponse;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::ClientRequest;
@@ -433,6 +438,81 @@ impl AppServerSession {
                 .await?;
         started.session.fork_parent_title = fork_parent_title;
         Ok(started)
+    }
+
+    pub(crate) async fn resume_thread_preserving_stored_config(
+        &mut self,
+        display_config: &Config,
+        thread_id: ThreadId,
+    ) -> Result<AppServerStartedThread> {
+        let request_id = self.next_request_id();
+        let response: ThreadResumeResponse = self
+            .client
+            .request_typed(ClientRequest::ThreadResume {
+                request_id,
+                params: ThreadResumeParams {
+                    thread_id: thread_id.to_string(),
+                    ..ThreadResumeParams::default()
+                },
+            })
+            .await
+            .map_err(|err| {
+                bootstrap_request_error("thread/resume failed during TUI agent attach", err)
+            })?;
+        let fork_parent_title = self
+            .fork_parent_title_from_app_server(response.thread.forked_from_id.as_deref())
+            .await;
+        let mut started = started_thread_from_resume_response(
+            response,
+            display_config,
+            self.thread_params_mode(),
+        )
+        .await?;
+        started.session.fork_parent_title = fork_parent_title;
+        Ok(started)
+    }
+
+    pub(crate) async fn list_agent_roles(
+        &mut self,
+        parent_thread_id: ThreadId,
+    ) -> Result<Vec<AgentRoleSummary>> {
+        let request_id = self.next_request_id();
+        let response: AgentListRolesResponse = self
+            .client
+            .request_typed(ClientRequest::AgentListRoles {
+                request_id,
+                params: AgentListRolesParams {
+                    thread_id: parent_thread_id.to_string(),
+                },
+            })
+            .await
+            .wrap_err("agent/list_roles failed")?;
+        Ok(response.roles)
+    }
+
+    pub(crate) async fn spawn_agent(
+        &mut self,
+        parent_thread_id: ThreadId,
+        agent_type: Option<String>,
+        task_name: String,
+        message: String,
+    ) -> Result<ThreadId> {
+        let request_id = self.next_request_id();
+        let response: AgentSpawnResponse = self
+            .client
+            .request_typed(ClientRequest::AgentSpawn {
+                request_id,
+                params: AgentSpawnParams {
+                    thread_id: parent_thread_id.to_string(),
+                    agent_type,
+                    task_name,
+                    message,
+                },
+            })
+            .await
+            .wrap_err("agent/spawn failed")?;
+        ThreadId::from_string(&response.thread_id)
+            .wrap_err("agent/spawn returned an invalid thread_id")
     }
 
     pub(crate) async fn fork_thread(
@@ -1597,21 +1677,12 @@ async fn thread_session_state_from_thread_resume_response(
     config: &Config,
     thread_params_mode: ThreadParamsMode,
 ) -> Result<ThreadSessionState, String> {
-    let permission_profile = if matches!(thread_params_mode, ThreadParamsMode::Embedded)
-        && response.active_permission_profile.is_none()
-    {
-        PermissionProfile::from_legacy_sandbox_policy_for_cwd(
-            &response.sandbox.to_core(),
-            response.cwd.as_path(),
-        )
-    } else {
-        display_permission_profile_from_thread_response(
-            &response.sandbox,
-            response.cwd.as_path(),
-            config,
-            thread_params_mode,
-        )
-    };
+    let permission_profile = display_permission_profile_from_thread_response(
+        &response.sandbox,
+        response.cwd.as_path(),
+        config,
+        thread_params_mode,
+    );
     thread_session_state_from_thread_response(
         &response.thread.id,
         response.thread.forked_from_id.clone(),
@@ -1668,15 +1739,10 @@ async fn thread_session_state_from_thread_fork_response(
 fn display_permission_profile_from_thread_response(
     sandbox: &codex_app_server_protocol::SandboxPolicy,
     cwd: &std::path::Path,
-    config: &Config,
-    thread_params_mode: ThreadParamsMode,
+    _config: &Config,
+    _thread_params_mode: ThreadParamsMode,
 ) -> PermissionProfile {
-    match thread_params_mode {
-        ThreadParamsMode::Embedded => config.permissions.effective_permission_profile(),
-        ThreadParamsMode::Remote => {
-            PermissionProfile::from_legacy_sandbox_policy_for_cwd(&sandbox.to_core(), cwd)
-        }
-    }
+    PermissionProfile::from_legacy_sandbox_policy_for_cwd(&sandbox.to_core(), cwd)
 }
 
 #[expect(
@@ -2411,7 +2477,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_thread_response_uses_local_config_profile() {
+    async fn embedded_thread_response_uses_response_sandbox_profile() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let config = ConfigBuilder::default()
             .codex_home(temp_dir.path().to_path_buf())
@@ -2431,7 +2497,7 @@ mod tests {
                 &config,
                 ThreadParamsMode::Embedded,
             ),
-            PermissionProfile::read_only()
+            PermissionProfile::Disabled
         );
     }
 

@@ -151,18 +151,20 @@ fn merge_persisted_resume_metadata(
     typesafe_overrides: &mut ConfigOverrides,
     persisted_metadata: &ThreadMetadata,
 ) {
-    if has_model_resume_override(request_overrides.as_ref(), typesafe_overrides) {
-        return;
+    if !has_model_resume_override(request_overrides.as_ref(), typesafe_overrides) {
+        typesafe_overrides.model = persisted_metadata.model.clone();
+        typesafe_overrides.model_provider = Some(persisted_metadata.model_provider.clone());
+
+        if let Some(reasoning_effort) = persisted_metadata.reasoning_effort {
+            request_overrides.get_or_insert_with(HashMap::new).insert(
+                "model_reasoning_effort".to_string(),
+                serde_json::Value::String(reasoning_effort.to_string()),
+            );
+        }
     }
 
-    typesafe_overrides.model = persisted_metadata.model.clone();
-    typesafe_overrides.model_provider = Some(persisted_metadata.model_provider.clone());
-
-    if let Some(reasoning_effort) = persisted_metadata.reasoning_effort {
-        request_overrides.get_or_insert_with(HashMap::new).insert(
-            "model_reasoning_effort".to_string(),
-            serde_json::Value::String(reasoning_effort.to_string()),
-        );
+    if !has_permission_resume_override(request_overrides.as_ref(), typesafe_overrides) {
+        apply_persisted_resume_permissions(typesafe_overrides, persisted_metadata);
     }
 }
 
@@ -199,6 +201,63 @@ fn has_model_resume_override(
         || request_overrides.is_some_and(|overrides| overrides.contains_key("model"))
         || request_overrides
             .is_some_and(|overrides| overrides.contains_key("model_reasoning_effort"))
+}
+
+fn has_permission_resume_override(
+    request_overrides: Option<&HashMap<String, serde_json::Value>>,
+    typesafe_overrides: &ConfigOverrides,
+) -> bool {
+    typesafe_overrides.approval_policy.is_some()
+        || typesafe_overrides.approvals_reviewer.is_some()
+        || typesafe_overrides.sandbox_mode.is_some()
+        || typesafe_overrides.permission_profile.is_some()
+        || typesafe_overrides.default_permissions.is_some()
+        || request_overrides.is_some_and(|overrides| {
+            overrides.contains_key("approval_policy")
+                || overrides.contains_key("sandbox_mode")
+                || overrides.contains_key("permissions")
+                || overrides.contains_key("default_permissions")
+                || overrides.contains_key("shell_environment_policy")
+        })
+}
+
+fn apply_persisted_resume_permissions(
+    typesafe_overrides: &mut ConfigOverrides,
+    persisted_metadata: &ThreadMetadata,
+) {
+    match serde_json::from_value::<codex_protocol::protocol::AskForApproval>(
+        serde_json::Value::String(persisted_metadata.approval_mode.clone()),
+    ) {
+        Ok(approval_policy) => {
+            typesafe_overrides.approval_policy = Some(approval_policy);
+        }
+        Err(err) => {
+            tracing::warn!(
+                approval_mode = %persisted_metadata.approval_mode,
+                "failed to parse persisted approval mode for thread resume: {err}"
+            );
+        }
+    }
+
+    match persisted_metadata
+        .sandbox_policy
+        .parse::<codex_protocol::protocol::SandboxPolicy>()
+    {
+        Ok(sandbox_policy) => {
+            typesafe_overrides.permission_profile = Some(
+                codex_protocol::models::PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+                    &sandbox_policy,
+                    persisted_metadata.cwd.as_path(),
+                ),
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                sandbox_policy = %persisted_metadata.sandbox_policy,
+                "failed to parse persisted sandbox policy for thread resume: {err}"
+            );
+        }
+    }
 }
 
 fn validate_dynamic_tools(tools: &[ApiDynamicToolSpec]) -> Result<(), String> {
@@ -391,6 +450,24 @@ impl ThreadRequestProcessor {
         )
         .await
         .map(|()| None)
+    }
+
+    pub(crate) async fn agent_spawn(
+        &self,
+        params: AgentSpawnParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.agent_spawn_response_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn agent_list_roles(
+        &self,
+        params: AgentListRolesParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.agent_list_roles_response_inner(params)
+            .await
+            .map(|response| Some(response.into()))
     }
 
     pub(crate) async fn thread_unsubscribe(
@@ -1386,6 +1463,54 @@ impl ThreadRequestProcessor {
         }
 
         Ok((ThreadArchiveResponse {}, archived_thread_ids))
+    }
+
+    async fn agent_spawn_response_inner(
+        &self,
+        params: AgentSpawnParams,
+    ) -> Result<AgentSpawnResponse, JSONRPCErrorError> {
+        let parent_thread_id = ThreadId::from_string(&params.thread_id)
+            .map_err(|err| invalid_params(format!("invalid thread_id: {err}")))?;
+        let parent_thread = self
+            .thread_manager
+            .get_thread(parent_thread_id)
+            .await
+            .map_err(|err| {
+                invalid_params(format!("thread {parent_thread_id} is not loaded: {err}"))
+            })?;
+        let child_thread_id = parent_thread
+            .spawn_codexx_agent(params.agent_type, params.task_name, params.message)
+            .await
+            .map_err(|err| invalid_params(format!("failed to spawn agent: {err}")))?;
+        Ok(AgentSpawnResponse {
+            thread_id: child_thread_id.to_string(),
+        })
+    }
+
+    async fn agent_list_roles_response_inner(
+        &self,
+        params: AgentListRolesParams,
+    ) -> Result<AgentListRolesResponse, JSONRPCErrorError> {
+        let parent_thread_id = ThreadId::from_string(&params.thread_id)
+            .map_err(|err| invalid_params(format!("invalid thread_id: {err}")))?;
+        let parent_thread = self
+            .thread_manager
+            .get_thread(parent_thread_id)
+            .await
+            .map_err(|err| {
+                invalid_params(format!("thread {parent_thread_id} is not loaded: {err}"))
+            })?;
+        let config = parent_thread.config().await;
+        let roles = config
+            .agent_roles
+            .iter()
+            .map(|(agent_type, role)| AgentRoleSummary {
+                agent_type: agent_type.clone(),
+                description: role.description.clone(),
+                nickname_candidates: role.nickname_candidates.clone(),
+            })
+            .collect();
+        Ok(AgentListRolesResponse { roles })
     }
 
     async fn thread_increment_elicitation_inner(

@@ -189,25 +189,97 @@ fn register_agent_tool() -> ResponsesApiTool {
 }
 
 pub fn create_codexx_resume_agent_tool() -> ToolSpec {
-    let properties = BTreeMap::from([(
-        "target".to_string(),
-        JsonSchema::string(Some(
-            "Agent id, relative task name, or canonical task path to resume.".to_string(),
-        )),
-    )]);
+    let properties = BTreeMap::from([
+        (
+            "target".to_string(),
+            JsonSchema::string(Some(
+                "Optional agent id, relative task name, or canonical task path to resume. Omit to list selectable historical agents.".to_string(),
+            )),
+        ),
+        (
+            "thread_id".to_string(),
+            JsonSchema::string(Some(
+                "Optional exact thread id to resume; do not combine with target, task_name, or agent_path.".to_string(),
+            )),
+        ),
+        (
+            "task_name".to_string(),
+            JsonSchema::string(Some(
+                "Optional exact task name to resume; do not combine with target, thread_id, or agent_path.".to_string(),
+            )),
+        ),
+        (
+            "agent_path".to_string(),
+            JsonSchema::string(Some(
+                "Optional canonical agent path to resume; do not combine with target, thread_id, or task_name.".to_string(),
+            )),
+        ),
+        (
+            "query".to_string(),
+            JsonSchema::string(Some(
+                "Optional query used only when no target is provided and resume_agent returns a selection table.".to_string(),
+            )),
+        ),
+        (
+            "limit".to_string(),
+            JsonSchema::integer(Some(
+                "Optional selection table limit when no target is provided. Defaults to 50 and caps at 200.".to_string(),
+            )),
+        ),
+        (
+            "resume_scope".to_string(),
+            JsonSchema::string(Some(
+                "Whether to resume only the selected agent (`self`, default), its open descendant subtree (`subtree`), or all stored descendants including closed threads (`all`).".to_string(),
+            )),
+        ),
+    ]);
 
     codexx_namespace_tool(ResponsesApiTool {
         name: "resume_agent".to_string(),
-        description: "Resume a previously closed agent by id, task name, or canonical task path."
+        description: "Resume a previously closed agent by id, task name, or canonical task path. If no target is provided, returns a historical agent selection table instead of resuming."
             .to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::object(
-            properties,
-            Some(vec!["target".to_string()]),
-            Some(false.into()),
-        ),
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
         output_schema: Some(resume_agent_output_schema()),
+    })
+}
+
+pub fn create_codexx_list_agents_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "thread_id".to_string(),
+            JsonSchema::string(Some("Exact thread id filter.".to_string())),
+        ),
+        (
+            "task_name".to_string(),
+            JsonSchema::string(Some("Exact task name filter.".to_string())),
+        ),
+        (
+            "agent_path".to_string(),
+            JsonSchema::string(Some("Exact canonical or relative agent path filter.".to_string())),
+        ),
+        (
+            "query".to_string(),
+            JsonSchema::string(Some(
+                "Case-insensitive search across summary, nickname, agent type, path, and thread id.".to_string(),
+            )),
+        ),
+        (
+            "limit".to_string(),
+            JsonSchema::integer(Some(
+                "Maximum rows to return. Defaults to 50 and caps at 200.".to_string(),
+            )),
+        ),
+    ]);
+
+    codexx_namespace_tool(ResponsesApiTool {
+        name: "list_agents".to_string(),
+        description: "List historical Codexx sub-agents from the current root session's state DB. Returns structured rows plus an ASCII table.".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: Some(codexx_list_agents_output_schema()),
     })
 }
 
@@ -530,14 +602,72 @@ fn list_agents_output_schema() -> Value {
     })
 }
 
-fn resume_agent_output_schema() -> Value {
+fn codexx_list_agents_output_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "status": agent_status_output_schema()
+            "table": {
+                "type": "string",
+                "description": "ASCII table rendering of the returned agents."
+            },
+            "agents": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "task_name": {
+                            "type": ["string", "null"]
+                        },
+                        "agent_path": {
+                            "type": ["string", "null"]
+                        },
+                        "thread_id": {
+                            "type": "string"
+                        },
+                        "agent_type": {
+                            "type": ["string", "null"]
+                        },
+                        "nickname": {
+                            "type": ["string", "null"]
+                        },
+                        "live_status": agent_status_output_schema(),
+                        "summary": {
+                            "type": "string"
+                        }
+                    },
+                    "required": ["task_name", "agent_path", "thread_id", "agent_type", "nickname", "live_status", "summary"],
+                    "additionalProperties": false
+                }
+            },
+            "truncated": {
+                "type": "boolean"
+            },
+            "selection_required": {
+                "type": "boolean"
+            }
         },
-        "required": ["status"],
+        "required": ["table", "agents", "truncated", "selection_required"],
         "additionalProperties": false
+    })
+}
+
+fn resume_agent_output_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "status": agent_status_output_schema(),
+                    "resume_scope": {
+                        "type": "string",
+                        "enum": ["self", "subtree", "all"]
+                    }
+                },
+                "required": ["status", "resume_scope"],
+                "additionalProperties": false
+            },
+            codexx_list_agents_output_schema()
+        ]
     })
 }
 

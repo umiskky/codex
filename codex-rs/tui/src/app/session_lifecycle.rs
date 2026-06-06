@@ -83,6 +83,375 @@ impl App {
         });
     }
 
+    pub(super) async fn open_agent_resume_picker(&mut self, app_server: &mut AppServerSession) {
+        let threads = match self.recoverable_agent_threads(app_server).await {
+            Ok(threads) => threads,
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to list recoverable agents: {err}"));
+                return;
+            }
+        };
+
+        if threads.is_empty() {
+            self.chat_widget.add_info_message(
+                "No recoverable agents found.".to_string(),
+                Some(
+                    "Use /agent to switch among agents already loaded in this session.".to_string(),
+                ),
+            );
+            return;
+        }
+
+        let mut items = Vec::with_capacity(threads.len() + 1);
+        items.push(SelectionItem {
+            name: "Resume all shown agents".to_string(),
+            description: Some(format!("{} recoverable agents", threads.len())),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::ResumeAllRecoverableAgents);
+            })],
+            dismiss_on_select: true,
+            search_value: Some("resume all recoverable agents".to_string()),
+            ..Default::default()
+        });
+
+        items.extend(threads.into_iter().map(|thread| {
+            let id = ThreadId::from_string(&thread.id).expect("filtered thread ids are valid");
+            let path = agent_path_from_thread(&thread).unwrap_or_else(|| "/root/?".to_string());
+            let task_name = path
+                .rsplit('/')
+                .next()
+                .filter(|value| !value.is_empty())
+                .unwrap_or("agent");
+            let nickname = thread
+                .agent_nickname
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("Agent");
+            let role = thread
+                .agent_role
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("default");
+            let short_id = thread.id.chars().take(8).collect::<String>();
+            let summary = thread
+                .name
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| thread.preview.clone());
+            SelectionItem {
+                name: format!("{nickname} [{role}]"),
+                name_prefix_spans: agent_picker_status_dot_spans(/*is_closed*/ true),
+                description: Some(format!(
+                    "task={task_name} path={path} thread={short_id} summary={summary}"
+                )),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::ResumeAgentThread(id));
+                })],
+                dismiss_on_select: true,
+                search_value: Some(format!(
+                    "{nickname} {role} {task_name} {path} {} {summary}",
+                    thread.id
+                )),
+                ..Default::default()
+            }
+        }));
+
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            title: Some("Subagents".to_string()),
+            subtitle: Some("Recoverable historical agents not loaded in this session.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            is_searchable: true,
+            col_width_mode: ColumnWidthMode::AutoAllRows,
+            ..Default::default()
+        });
+    }
+
+    pub(super) async fn open_agent_new_picker(&mut self, app_server: &mut AppServerSession) {
+        let Some(parent_thread_id) = self.active_thread_id.or(self.primary_thread_id) else {
+            self.chat_widget.add_error_message(
+                "/agent new is unavailable before the session starts.".to_string(),
+            );
+            return;
+        };
+
+        let mut roles = match app_server.list_agent_roles(parent_thread_id).await {
+            Ok(roles) => roles,
+            Err(err) => {
+                tracing::warn!("failed to list runtime agent roles: {err}");
+                self.agent_roles_from_startup_config()
+            }
+        };
+        roles.sort_by(|left, right| left.agent_type.cmp(&right.agent_type));
+
+        let mut items = Vec::with_capacity(roles.len() + 1);
+        items.push(SelectionItem {
+            name: "default".to_string(),
+            description: Some("Spawn without an agent_type override".to_string()),
+            actions: vec![Box::new(move |tx| {
+                tx.send(AppEvent::OpenAgentNewParamsPrompt {
+                    parent_thread_id,
+                    agent_type: None,
+                });
+            })],
+            dismiss_on_select: true,
+            search_value: Some("default".to_string()),
+            ..Default::default()
+        });
+
+        items.extend(roles.into_iter().map(|role| {
+            let agent_type = role.agent_type;
+            let description = role.description;
+            let nicknames = role
+                .nickname_candidates
+                .as_ref()
+                .map(|values| values.join(", "))
+                .filter(|value| !value.is_empty());
+            let row_description = match (description.as_deref(), nicknames.as_deref()) {
+                (Some(description), Some(nicknames)) => {
+                    Some(format!("{description} nicknames={nicknames}"))
+                }
+                (Some(description), None) => Some(description.to_string()),
+                (None, Some(nicknames)) => Some(format!("nicknames={nicknames}")),
+                (None, None) => None,
+            };
+            let selected_agent_type = agent_type.clone();
+            SelectionItem {
+                name: agent_type.clone(),
+                description: row_description.clone(),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::OpenAgentNewParamsPrompt {
+                        parent_thread_id,
+                        agent_type: Some(selected_agent_type.clone()),
+                    });
+                })],
+                dismiss_on_select: true,
+                search_value: Some(format!(
+                    "{} {}",
+                    agent_type,
+                    row_description.unwrap_or_default()
+                )),
+                ..Default::default()
+            }
+        }));
+
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            title: Some("New Subagent".to_string()),
+            subtitle: Some(
+                "Choose an agent_type, then enter task_name -- initial message.".to_string(),
+            ),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            is_searchable: true,
+            col_width_mode: ColumnWidthMode::AutoAllRows,
+            ..Default::default()
+        });
+    }
+
+    fn agent_roles_from_startup_config(&self) -> Vec<AgentRoleSummary> {
+        self.config
+            .agent_roles
+            .iter()
+            .map(|(agent_type, role)| AgentRoleSummary {
+                agent_type: agent_type.clone(),
+                description: role.description.clone(),
+                nickname_candidates: role.nickname_candidates.clone(),
+            })
+            .collect()
+    }
+
+    pub(super) async fn recoverable_agent_threads(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) -> Result<Vec<Thread>> {
+        let Some(primary_thread_id) = self.primary_thread_id else {
+            return Ok(Vec::new());
+        };
+
+        let loaded_ids = app_server
+            .thread_loaded_list(ThreadLoadedListParams {
+                cursor: None,
+                limit: None,
+            })
+            .await
+            .map(|response| {
+                response
+                    .data
+                    .into_iter()
+                    .filter_map(|thread_id| ThreadId::from_string(&thread_id).ok())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+
+        let mut all_threads = Vec::new();
+        let mut cursor = None;
+        loop {
+            let response = app_server
+                .thread_list(ThreadListParams {
+                    cursor,
+                    limit: Some(100),
+                    sort_key: Some(ThreadSortKey::CreatedAt),
+                    sort_direction: Some(SortDirection::Asc),
+                    model_providers: None,
+                    source_kinds: Some(vec![ThreadSourceKind::SubAgentThreadSpawn]),
+                    archived: Some(false),
+                    cwd: None,
+                    use_state_db_only: true,
+                    search_term: None,
+                })
+                .await?;
+            all_threads.extend(response.data);
+            cursor = response.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        let thread_by_id = all_threads
+            .iter()
+            .filter_map(|thread| {
+                ThreadId::from_string(&thread.id)
+                    .ok()
+                    .map(|thread_id| (thread_id, thread.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut recoverable = all_threads
+            .into_iter()
+            .filter(|thread| {
+                let Ok(thread_id) = ThreadId::from_string(&thread.id) else {
+                    return false;
+                };
+                !loaded_ids.contains(&thread_id)
+                    && !self.thread_event_channels.contains_key(&thread_id)
+                    && !self
+                        .agent_navigation
+                        .tracked_thread_ids()
+                        .contains(&thread_id)
+                    && thread_is_descendant_of_primary(thread, primary_thread_id, &thread_by_id)
+            })
+            .collect::<Vec<_>>();
+        recoverable.sort_by(|left, right| {
+            agent_path_from_thread(left)
+                .cmp(&agent_path_from_thread(right))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(recoverable)
+    }
+
+    pub(super) async fn resume_agent_thread_from_history(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+    ) -> Result<()> {
+        self.resume_agent_thread_into_session(app_server, thread_id)
+            .await?;
+        self.select_agent_thread_and_discard_side(tui, app_server, thread_id)
+            .await
+    }
+
+    pub(super) async fn resume_all_recoverable_agent_threads(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) -> Result<()> {
+        let threads = self.recoverable_agent_threads(app_server).await?;
+        let total = threads.len();
+        let mut resumed = 0usize;
+        for thread in threads {
+            let Ok(thread_id) = ThreadId::from_string(&thread.id) else {
+                continue;
+            };
+            match self
+                .resume_agent_thread_into_session(app_server, thread_id)
+                .await
+            {
+                Ok(()) => resumed += 1,
+                Err(err) => {
+                    tracing::warn!(thread_id = %thread_id, "failed to resume recoverable agent: {err}");
+                }
+            }
+        }
+
+        self.chat_widget.add_info_message(
+            format!("Resumed {resumed} of {total} recoverable agents."),
+            /*hint*/ None,
+        );
+        Ok(())
+    }
+
+    pub(super) async fn spawn_agent_from_prompt(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        parent_thread_id: ThreadId,
+        agent_type: Option<String>,
+        prompt: String,
+    ) {
+        let (task_name, message) = match parse_agent_new_prompt(&prompt) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.chat_widget.add_error_message(err);
+                self.chat_widget
+                    .show_agent_new_params_prompt(parent_thread_id, agent_type);
+                return;
+            }
+        };
+        match app_server
+            .spawn_agent(parent_thread_id, agent_type, task_name.clone(), message)
+            .await
+        {
+            Ok(thread_id) => {
+                if let Err(err) = self
+                    .resume_agent_thread_from_history(tui, app_server, thread_id)
+                    .await
+                {
+                    self.chat_widget.add_error_message(format!(
+                        "Spawned agent {thread_id}, but failed to attach it: {err}"
+                    ));
+                    return;
+                }
+                self.chat_widget
+                    .add_info_message(format!("Spawned subagent {task_name}."), /*hint*/ None);
+            }
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to spawn subagent: {err}"));
+            }
+        }
+    }
+
+    async fn resume_agent_thread_into_session(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+    ) -> Result<()> {
+        let started = app_server
+            .resume_thread_preserving_stored_config(&self.config, thread_id)
+            .await?;
+        let metadata = app_server
+            .thread_read(thread_id, /*include_turns*/ false)
+            .await
+            .ok();
+
+        let channel = self.ensure_thread_channel(thread_id);
+        {
+            let mut store = channel.store.lock().await;
+            store.set_session(started.session, started.turns);
+        }
+        self.upsert_agent_picker_thread(
+            thread_id,
+            metadata
+                .as_ref()
+                .and_then(|thread| thread.agent_nickname.clone()),
+            metadata
+                .as_ref()
+                .and_then(|thread| thread.agent_role.clone()),
+            /*is_closed*/ false,
+        );
+        Ok(())
+    }
+
     pub(super) fn is_terminal_thread_read_error(err: &color_eyre::Report) -> bool {
         err.chain()
             .any(|cause| cause.to_string().contains("thread not loaded:"))
@@ -207,7 +576,7 @@ impl App {
         }
 
         let (session, turns, live_attached) = match app_server
-            .resume_thread(self.config.clone(), thread_id)
+            .resume_thread_preserving_stored_config(&self.config, thread_id)
             .await
         {
             Ok(started) => (started.session, started.turns, true),
@@ -771,6 +1140,69 @@ impl App {
     }
 }
 
+fn agent_path_from_thread(thread: &Thread) -> Option<String> {
+    match &thread.source {
+        codex_app_server_protocol::SessionSource::SubAgent(
+            codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+                agent_path: Some(agent_path),
+                ..
+            },
+        ) => Some(agent_path.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_agent_new_prompt(input: &str) -> std::result::Result<(String, String), String> {
+    let Some((task_name, message)) = input.trim().split_once("--") else {
+        return Err("Use task_name -- initial message.".to_string());
+    };
+    let task_name = task_name.trim();
+    let message = message.trim();
+    if task_name.is_empty() {
+        return Err("Agent task_name must not be empty.".to_string());
+    }
+    if message.is_empty() {
+        return Err("Agent initial message must not be empty.".to_string());
+    }
+    Ok((task_name.to_string(), message.to_string()))
+}
+
+fn parent_thread_id_from_thread(thread: &Thread) -> Option<ThreadId> {
+    thread
+        .parent_thread_id
+        .as_deref()
+        .and_then(|thread_id| ThreadId::from_string(thread_id).ok())
+        .or_else(|| match &thread.source {
+            codex_app_server_protocol::SessionSource::SubAgent(
+                codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+                    parent_thread_id, ..
+                },
+            ) => Some(*parent_thread_id),
+            _ => None,
+        })
+}
+
+fn thread_is_descendant_of_primary(
+    thread: &Thread,
+    primary_thread_id: ThreadId,
+    thread_by_id: &HashMap<ThreadId, Thread>,
+) -> bool {
+    let mut seen = HashSet::new();
+    let mut parent_thread_id = parent_thread_id_from_thread(thread);
+    while let Some(parent_id) = parent_thread_id {
+        if parent_id == primary_thread_id {
+            return true;
+        }
+        if !seen.insert(parent_id) {
+            return false;
+        }
+        parent_thread_id = thread_by_id
+            .get(&parent_id)
+            .and_then(parent_thread_id_from_thread);
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,5 +1258,16 @@ mod tests {
 
         assert!(App::can_fallback_from_include_turns_error(&unmaterialized));
         assert!(App::can_fallback_from_include_turns_error(&ephemeral));
+    }
+
+    #[test]
+    fn parse_agent_new_prompt_requires_task_and_message() {
+        assert_eq!(
+            parse_agent_new_prompt("research -- inspect the repo").unwrap(),
+            ("research".to_string(), "inspect the repo".to_string())
+        );
+        assert!(parse_agent_new_prompt("research").is_err());
+        assert!(parse_agent_new_prompt(" -- inspect").is_err());
+        assert!(parse_agent_new_prompt("research -- ").is_err());
     }
 }

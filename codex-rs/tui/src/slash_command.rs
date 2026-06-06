@@ -160,6 +160,8 @@ impl SlashCommand {
                 | SlashCommand::Pets
                 | SlashCommand::Side
                 | SlashCommand::Btw
+                | SlashCommand::Agent
+                | SlashCommand::MultiAgents
                 | SlashCommand::Resume
                 | SlashCommand::SandboxReadRoot
         )

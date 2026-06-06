@@ -13,10 +13,16 @@ use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_tools::ToolSpec;
 
-#[derive(Default)]
 pub(crate) struct Handler {
     options: SpawnAgentToolOptions,
     sync_runtime_agent_roles: bool,
+    reapply_parent_runtime_after_role: bool,
+}
+
+impl Default for Handler {
+    fn default() -> Self {
+        Self::new(SpawnAgentToolOptions::default())
+    }
 }
 
 impl Handler {
@@ -24,13 +30,15 @@ impl Handler {
         Self {
             options,
             sync_runtime_agent_roles: false,
+            reapply_parent_runtime_after_role: true,
         }
     }
 
-    pub(crate) fn new_with_runtime_agent_roles(options: SpawnAgentToolOptions) -> Self {
+    pub(crate) fn new_for_codexx(options: SpawnAgentToolOptions) -> Self {
         Self {
             options,
             sync_runtime_agent_roles: true,
+            reapply_parent_runtime_after_role: false,
         }
     }
 }
@@ -49,15 +57,20 @@ impl ToolExecutor<ToolInvocation> for Handler {
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
-        handle_spawn_agent(invocation, self.sync_runtime_agent_roles)
-            .await
-            .map(boxed_tool_output)
+        handle_spawn_agent(
+            invocation,
+            self.sync_runtime_agent_roles,
+            self.reapply_parent_runtime_after_role,
+        )
+        .await
+        .map(boxed_tool_output)
     }
 }
 
-async fn handle_spawn_agent(
+pub(crate) async fn handle_spawn_agent(
     invocation: ToolInvocation,
     sync_runtime_agent_roles_for_spawn: bool,
+    reapply_parent_runtime_after_role: bool,
 ) -> Result<SpawnAgentResult, FunctionCallError> {
     let ToolInvocation {
         session,
@@ -116,6 +129,7 @@ async fn handle_spawn_agent(
         apply_role_to_config(&mut config, role_name)
             .await
             .map_err(FunctionCallError::RespondToModel)?;
+        fill_missing_spawn_agent_model_runtime_defaults(&mut config, turn.as_ref());
     }
     apply_spawn_agent_service_tier(
         &session,
@@ -124,7 +138,9 @@ async fn handle_spawn_agent(
         args.service_tier.as_deref(),
     )
     .await?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    if reapply_parent_runtime_after_role {
+        apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    }
 
     let spawn_source = thread_spawn_source(
         session.thread_id,
@@ -316,6 +332,14 @@ pub(crate) enum SpawnAgentResult {
     HiddenMetadata {
         task_name: String,
     },
+}
+
+impl SpawnAgentResult {
+    pub(crate) fn task_name(&self) -> &str {
+        match self {
+            Self::WithNickname { task_name, .. } | Self::HiddenMetadata { task_name } => task_name,
+        }
+    }
 }
 
 impl ToolOutput for SpawnAgentResult {

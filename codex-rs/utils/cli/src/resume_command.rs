@@ -4,6 +4,14 @@ use codex_protocol::ThreadId;
 use codex_shell_command::parse_command::shlex_join;
 
 pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
+    resume_command_for_binary(&resume_binary_name(), thread_name, thread_id)
+}
+
+pub fn resume_command_for_binary(
+    binary_name: &str,
+    thread_name: Option<&str>,
+    thread_id: Option<ThreadId>,
+) -> Option<String> {
     let resume_target = thread_name
         .filter(|name| !name.is_empty())
         .map(str::to_string)
@@ -12,20 +20,44 @@ pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) ->
         let needs_double_dash = target.starts_with('-');
         let escaped = shlex_join(&[target]);
         if needs_double_dash {
-            format!("codex resume -- {escaped}")
+            format!("{binary_name} resume -- {escaped}")
         } else {
-            format!("codex resume {escaped}")
+            format!("{binary_name} resume {escaped}")
         }
     })
 }
 
 pub fn resume_hint(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
+    resume_hint_for_binary(&resume_binary_name(), thread_name, thread_id)
+}
+
+pub fn resume_hint_for_binary(
+    binary_name: &str,
+    thread_name: Option<&str>,
+    thread_id: Option<ThreadId>,
+) -> Option<String> {
     let thread_id = thread_id?;
     match thread_name.filter(|name| !name.is_empty()) {
         Some(thread_name) => Some(format!(
-            "codex resume, then select {thread_name} ({thread_id})"
+            "{binary_name} resume, then select {thread_name} ({thread_id})"
         )),
-        None => resume_command(/*thread_name*/ None, Some(thread_id)),
+        None => resume_command_for_binary(binary_name, /*thread_name*/ None, Some(thread_id)),
+    }
+}
+
+fn resume_binary_name() -> String {
+    let arg0 = std::env::args_os()
+        .next()
+        .and_then(|arg| {
+            std::path::PathBuf::from(arg)
+                .file_stem()
+                .map(|name| name.to_owned())
+        })
+        .and_then(|name| name.into_string().ok());
+    if arg0.as_deref() == Some("codexx") {
+        "codexx".to_string()
+    } else {
+        "codex".to_string()
     }
 }
 
@@ -99,5 +131,15 @@ mod tests {
     fn resume_hint_requires_thread_id() {
         let hint = resume_hint(Some("my-thread"), /*thread_id*/ None);
         assert_eq!(hint, None);
+    }
+
+    #[test]
+    fn resume_hint_can_use_codexx_binary_name() {
+        let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let hint = resume_hint_for_binary("codexx", /*thread_name*/ None, Some(thread_id));
+        assert_eq!(
+            hint,
+            Some("codexx resume 123e4567-e89b-12d3-a456-426614174000".to_string())
+        );
     }
 }

@@ -1001,6 +1001,12 @@ impl MessageProcessor {
                     )
                     .await
             }
+            ClientRequest::AgentSpawn { params, .. } => {
+                self.thread_processor.agent_spawn(params).await
+            }
+            ClientRequest::AgentListRoles { params, .. } => {
+                self.thread_processor.agent_list_roles(params).await
+            }
             ClientRequest::ThreadUnsubscribe { params, .. } => {
                 self.thread_processor
                     .thread_unsubscribe(&request_id, params)

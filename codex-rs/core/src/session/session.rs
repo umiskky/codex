@@ -185,6 +185,11 @@ impl SessionConfiguration {
             cwd: self.cwd.clone(),
             workspace_roots: self.workspace_roots.clone(),
             profile_workspace_roots: self.profile_workspace_roots().to_vec(),
+            shell_environment_policy: self
+                .original_config_do_not_use
+                .permissions
+                .shell_environment_policy
+                .clone(),
             ephemeral: self.original_config_do_not_use.ephemeral,
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
             reasoning_summary: self.model_reasoning_summary,

@@ -805,6 +805,16 @@ impl ChatWidget {
                 self.app_event_tx
                     .send(AppEvent::ResumeSessionByIdOrName(args));
             }
+            SlashCommand::Agent | SlashCommand::MultiAgents if !trimmed.is_empty() => {
+                match trimmed.to_ascii_lowercase().as_str() {
+                    "resume" => self.app_event_tx.send(AppEvent::OpenAgentResumePicker),
+                    "resume --all" | "resume all" => {
+                        self.app_event_tx.send(AppEvent::ResumeAllRecoverableAgents);
+                    }
+                    "new" => self.app_event_tx.send(AppEvent::OpenAgentNewPicker),
+                    _ => self.add_error_message("Usage: /agent [resume [--all]|new]".to_string()),
+                }
+            }
             SlashCommand::SandboxReadRoot if !trimmed.is_empty() => {
                 self.app_event_tx
                     .send(AppEvent::BeginWindowsSandboxGrantReadRoot { path: args });

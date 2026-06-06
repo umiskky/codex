@@ -1146,7 +1146,7 @@ impl App {
         }
 
         match app_server
-            .resume_thread(self.config.clone(), thread_id)
+            .resume_thread_preserving_stored_config(&self.config, thread_id)
             .await
         {
             Ok(started) => {
@@ -1169,11 +1169,16 @@ impl App {
         is_replay_only: bool,
         snapshot: &ThreadEventSnapshot,
     ) -> bool {
-        !is_replay_only
-            && !self.side_threads.contains_key(&thread_id)
-            && snapshot.session.as_ref().is_none_or(|session| {
-                session.model.trim().is_empty() || session.rollout_path.is_none()
-            })
+        if is_replay_only || self.side_threads.contains_key(&thread_id) {
+            return false;
+        }
+        if self.primary_thread_id != Some(thread_id) {
+            return true;
+        }
+        snapshot
+            .session
+            .as_ref()
+            .is_none_or(|session| session.model.trim().is_empty() || session.rollout_path.is_none())
     }
 
     pub(super) async fn apply_refreshed_snapshot_thread(

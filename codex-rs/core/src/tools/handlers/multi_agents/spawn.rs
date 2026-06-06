@@ -107,6 +107,7 @@ async fn handle_spawn_agent(
         apply_role_to_config(&mut config, role_name)
             .await
             .map_err(FunctionCallError::RespondToModel)?;
+        fill_missing_spawn_agent_model_runtime_defaults(&mut config, turn.as_ref());
     }
     apply_spawn_agent_service_tier(
         &session,

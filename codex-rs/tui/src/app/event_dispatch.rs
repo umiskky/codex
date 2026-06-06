@@ -1703,9 +1703,45 @@ impl App {
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker(app_server).await;
             }
+            AppEvent::OpenAgentResumePicker => {
+                self.open_agent_resume_picker(app_server).await;
+            }
+            AppEvent::OpenAgentNewPicker => {
+                self.open_agent_new_picker(app_server).await;
+            }
+            AppEvent::OpenAgentNewParamsPrompt {
+                parent_thread_id,
+                agent_type,
+            } => {
+                self.chat_widget
+                    .show_agent_new_params_prompt(parent_thread_id, agent_type);
+            }
+            AppEvent::SpawnAgentFromPrompt {
+                parent_thread_id,
+                agent_type,
+                prompt,
+            } => {
+                self.spawn_agent_from_prompt(tui, app_server, parent_thread_id, agent_type, prompt)
+                    .await;
+            }
             AppEvent::SelectAgentThread(thread_id) => {
                 self.select_agent_thread_and_discard_side(tui, app_server, thread_id)
                     .await?;
+            }
+            AppEvent::ResumeAgentThread(thread_id) => {
+                if let Err(err) = self
+                    .resume_agent_thread_from_history(tui, app_server, thread_id)
+                    .await
+                {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to resume agent {thread_id}: {err}"));
+                }
+            }
+            AppEvent::ResumeAllRecoverableAgents => {
+                if let Err(err) = self.resume_all_recoverable_agent_threads(app_server).await {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to resume recoverable agents: {err}"));
+                }
             }
             AppEvent::StartSide {
                 parent_thread_id,

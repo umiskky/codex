@@ -142,6 +142,19 @@ impl ChatWidget {
             }
         }
 
+        if !items.iter().any(|item| item.is_current) {
+            items.insert(
+                0,
+                SelectionItem {
+                    name: "Custom permissions".to_string(),
+                    description: Some("Current thread permissions".to_string()),
+                    is_current: true,
+                    search_value: Some("custom permissions current".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+
         let footer_note = show_elevate_sandbox_hint.then(|| {
             vec![
                 "The non-admin sandbox protects your files and prevents network access under most circumstances. However, it carries greater risk if prompt injected. To upgrade to the default sandbox, run ".dim(),

@@ -7,11 +7,13 @@ use crate::session::SessionSettingsUpdate;
 use crate::session::SteerInputError;
 use codex_features::Feature;
 use codex_otel::SessionTelemetry;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
@@ -64,6 +66,7 @@ pub struct ThreadConfigSnapshot {
     pub cwd: AbsolutePathBuf,
     pub workspace_roots: Vec<AbsolutePathBuf>,
     pub profile_workspace_roots: Vec<AbsolutePathBuf>,
+    pub shell_environment_policy: ShellEnvironmentPolicy,
     pub ephemeral: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub reasoning_summary: Option<ReasoningSummary>,
@@ -134,6 +137,46 @@ impl CodexThread {
 
     pub async fn submit(&self, op: Op) -> CodexResult<String> {
         self.codex.submit(op).await
+    }
+
+    pub async fn spawn_codexx_agent(
+        &self,
+        agent_type: Option<String>,
+        task_name: String,
+        message: String,
+    ) -> CodexResult<ThreadId> {
+        let session = Arc::clone(&self.codex.session);
+        let turn = session.new_default_turn().await;
+        let arguments = serde_json::json!({
+            "message": message,
+            "task_name": task_name,
+            "agent_type": agent_type,
+            "fork_turns": "none"
+        })
+        .to_string();
+        let result = crate::tools::handlers::multi_agents_v2::spawn_codexx_agent_from_invocation(
+            crate::tools::context::ToolInvocation {
+                session: Arc::clone(&session),
+                turn: Arc::clone(&turn),
+                cancellation_token: tokio_util::sync::CancellationToken::new(),
+                tracker: Arc::new(tokio::sync::Mutex::new(
+                    crate::turn_diff_tracker::TurnDiffTracker::new(),
+                )),
+                call_id: format!("agent-new-{}", uuid::Uuid::new_v4()),
+                tool_name: codex_tools::ToolName::plain("spawn_agent"),
+                source: crate::tools::context::ToolCallSource::Direct,
+                payload: codex_tools::ToolPayload::Function { arguments },
+            },
+        )
+        .await
+        .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
+        let agent_path = AgentPath::try_from(result.task_name())
+            .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
+        session
+            .services
+            .agent_control
+            .resolve_agent_path_including_stored(session.thread_id, &agent_path)
+            .await
     }
 
     /// Returns the session telemetry handle for thread-scoped production instrumentation.

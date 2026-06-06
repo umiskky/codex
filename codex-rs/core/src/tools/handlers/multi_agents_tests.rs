@@ -8,6 +8,7 @@ use crate::session::tests::make_session_and_context;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::codexx_multi_agent::ListAgentsHandler as CodexxListAgentsHandler;
 use crate::tools::handlers::codexx_multi_agent::RegisterAgentHandler as CodexxRegisterAgentHandler;
 use crate::tools::handlers::codexx_multi_agent::ResumeAgentHandler as CodexxResumeAgentHandler;
 use crate::tools::handlers::codexx_multi_agent::SpawnAgentHandler as CodexxSpawnAgentHandler;
@@ -29,6 +30,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
+use codex_protocol::config_types::ShellEnvironmentPolicyInherit;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -170,6 +172,22 @@ where
     }
 }
 
+async fn wait_for_state_thread(
+    state_db: &crate::StateDbHandle,
+    thread_id: ThreadId,
+) -> codex_state::ThreadMetadata {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(Some(metadata)) = state_db.get_thread(thread_id).await {
+                return metadata;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("thread metadata should be persisted to sqlite")
+}
+
 #[derive(Debug, Deserialize)]
 struct ListAgentsResult {
     agents: Vec<ListedAgentResult>,
@@ -180,6 +198,25 @@ struct ListedAgentResult {
     agent_name: String,
     agent_status: serde_json::Value,
     last_task_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexxListAgentsResult {
+    table: String,
+    agents: Vec<CodexxListedAgentResult>,
+    truncated: bool,
+    selection_required: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexxListedAgentResult {
+    task_name: Option<String>,
+    agent_path: Option<String>,
+    thread_id: String,
+    agent_type: Option<String>,
+    nickname: Option<String>,
+    live_status: serde_json::Value,
+    summary: String,
 }
 
 #[tokio::test]
@@ -315,6 +352,7 @@ async fn codexx_register_agent_registers_agents_and_spawn_uses_them_without_rest
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         task_name: String,
+        nickname: Option<String>,
     }
 
     let (mut session, mut turn) = make_session_and_context().await;
@@ -327,6 +365,7 @@ async fn codexx_register_agent_registers_agents_and_spawn_uses_them_without_rest
     tokio::fs::write(
         project_agents_dir.join("fresh.toml"),
         r#"description = "Fresh project role"
+nickname_candidates = ["Freshy"]
 developer_instructions = "Use the fresh project role."
 model = "gpt-5.4"
 model_reasoning_effort = "minimal"
@@ -381,6 +420,7 @@ model_reasoning_effort = "minimal"
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
     assert_eq!(result.task_name, "/root/fresh_task");
+    assert_eq!(result.nickname.as_deref(), Some("Freshy"));
     let agent_id = session
         .services
         .agent_control
@@ -445,6 +485,96 @@ model = "gpt-5.4"
     let result: RegisterAgentResult =
         serde_json::from_str(&content).expect("register result should be json");
     assert_eq!(result.agent_types, vec!["reviewer".to_string()]);
+}
+
+#[tokio::test]
+async fn codexx_spawn_agent_role_permissions_override_parent_runtime_permissions() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let project = tempfile::tempdir().expect("project temp dir");
+    let project_agents_dir = project.path().join(".codex").join("agents");
+    tokio::fs::create_dir_all(&project_agents_dir)
+        .await
+        .expect("project agents dir should be created");
+    tokio::fs::write(
+        project_agents_dir.join("privileged.toml"),
+        r#"description = "Privileged role"
+developer_instructions = "Use the privileged project role."
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+"#,
+    )
+    .await
+    .expect("project role config should be written");
+
+    let mut config = (*turn.config).clone();
+    config.cwd = project.path().abs();
+    config
+        .permissions
+        .approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect("parent approval policy should be set");
+    config
+        .permissions
+        .set_permission_profile(PermissionProfile::read_only())
+        .expect("parent permission profile should be set");
+    #[allow(deprecated)]
+    {
+        turn.cwd = project.path().abs();
+    }
+    turn.approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect("parent turn approval policy should be set");
+    turn.permission_profile = PermissionProfile::read_only();
+    turn.config = Arc::new(config);
+
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    CodexxRegisterAgentHandler
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "register_agent",
+            function_payload(json!({
+                "agent_config_paths": [project_agents_dir.join("privileged.toml")],
+            })),
+        ))
+        .await
+        .expect("register_agent should load the privileged role");
+
+    let output = CodexxSpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "privileged_task",
+                "agent_type": "privileged",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("codexx spawn_agent should use the privileged role");
+    let _ = expect_text_output(output);
+
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "privileged_task")
+        .await
+        .expect("privileged task should resolve");
+    let snapshot = manager
+        .get_thread(agent_id)
+        .await
+        .expect("spawned agent thread should exist")
+        .config_snapshot()
+        .await;
+
+    assert_eq!(snapshot.approval_policy, AskForApproval::Never);
+    assert_eq!(snapshot.permission_profile, PermissionProfile::Disabled);
 }
 
 #[tokio::test]
@@ -1891,6 +2021,184 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
 }
 
 #[tokio::test]
+async fn codexx_list_agents_reads_historical_state_db_and_filters() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::Sqlite)
+        .expect("test config should allow sqlite");
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow multi-agent v2");
+    let state_db = init_state_db(&config)
+        .await
+        .expect("sqlite state db should initialize");
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Some(state_db.clone()),
+    );
+    let root = manager
+        .start_thread(config.clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    set_turn_config(&mut turn, config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    for (task_name, message) in [
+        ("alpha", "Alpha summary from the first task"),
+        ("beta", "Beta summary from the second task"),
+    ] {
+        CodexxSpawnAgentHandler::default()
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": message,
+                    "task_name": task_name,
+                    "fork_turns": "none"
+                })),
+            ))
+            .await
+            .expect("codexx spawn_agent should succeed");
+    }
+
+    let alpha_thread_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "alpha")
+        .await
+        .expect("alpha should resolve");
+    let beta_thread_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "beta")
+        .await
+        .expect("beta should resolve");
+    wait_for_state_thread(&state_db, alpha_thread_id).await;
+    wait_for_state_thread(&state_db, beta_thread_id).await;
+    session
+        .services
+        .agent_control
+        .shutdown_live_agent(alpha_thread_id)
+        .await
+        .expect("alpha shutdown should submit");
+
+    let output = CodexxListAgentsHandler
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("codexx list_agents should read historical sqlite records");
+    let (content, success) = expect_text_output(output);
+    let result: CodexxListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+    let rows = result
+        .agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.task_name.clone(),
+                agent.agent_path.clone(),
+                agent.thread_id.clone(),
+                agent.summary.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                Some("alpha".to_string()),
+                Some("/root/alpha".to_string()),
+                alpha_thread_id.to_string(),
+                "Alpha summary from the first task".to_string(),
+            ),
+            (
+                Some("beta".to_string()),
+                Some("/root/beta".to_string()),
+                beta_thread_id.to_string(),
+                "Beta summary from the second task".to_string(),
+            ),
+        ]
+    );
+    assert_eq!(result.truncated, false);
+    assert_eq!(result.selection_required, false);
+    assert_eq!(success, Some(true));
+    assert!(result.table.contains("TASK"));
+    assert!(result.table.contains("THREAD ID"));
+    assert!(result.table.contains("/root/alpha"));
+    assert!(result.table.contains("Alpha summary from the first task"));
+    let alpha = result
+        .agents
+        .iter()
+        .find(|agent| agent.task_name.as_deref() == Some("alpha"))
+        .expect("alpha row should be present");
+    assert_eq!(alpha.live_status, json!("not_found"));
+    assert_eq!(alpha.agent_type, None);
+    assert!(alpha.nickname.is_some());
+
+    let query_output = CodexxListAgentsHandler
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "list_agents",
+            function_payload(json!({"query": "second task"})),
+        ))
+        .await
+        .expect("query filter should succeed");
+    let (query_content, _) = expect_text_output(query_output);
+    let query_result: CodexxListAgentsResult =
+        serde_json::from_str(&query_content).expect("query result should be json");
+    assert_eq!(query_result.agents.len(), 1);
+    assert_eq!(query_result.agents[0].task_name.as_deref(), Some("beta"));
+
+    let path_output = CodexxListAgentsHandler
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "list_agents",
+            function_payload(json!({"agent_path": "/root/alpha"})),
+        ))
+        .await
+        .expect("agent_path filter should succeed");
+    let (path_content, _) = expect_text_output(path_output);
+    let path_result: CodexxListAgentsResult =
+        serde_json::from_str(&path_content).expect("path result should be json");
+    assert_eq!(path_result.agents.len(), 1);
+    assert_eq!(path_result.agents[0].thread_id, alpha_thread_id.to_string());
+
+    let id_output = CodexxListAgentsHandler
+        .handle(invocation(
+            session,
+            turn,
+            "list_agents",
+            function_payload(json!({"thread_id": beta_thread_id.to_string()})),
+        ))
+        .await
+        .expect("thread_id filter should succeed");
+    let (id_content, _) = expect_text_output(id_output);
+    let id_result: CodexxListAgentsResult =
+        serde_json::from_str(&id_content).expect("id result should be json");
+    assert_eq!(id_result.agents.len(), 1);
+    assert_eq!(
+        id_result.agents[0].agent_path.as_deref(),
+        Some("/root/beta")
+    );
+}
+
+#[tokio::test]
 async fn multi_agent_v2_send_message_rejects_legacy_items_field() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -2947,12 +3255,79 @@ async fn codexx_resume_agent_resolves_task_name_and_preserves_child_model_and_ef
         .expect("test config should allow feature update");
     set_turn_config(&mut turn, config);
 
+    let child_cwd = tempfile::tempdir().expect("child cwd temp dir");
+    let child_cwd = child_cwd.path().abs();
+    let parent_cwd = tempfile::tempdir().expect("parent cwd temp dir");
+    let parent_cwd = parent_cwd.path().abs();
+    let mut child_config = (*turn.config).clone();
+    let mut child_shell_environment_policy = ShellEnvironmentPolicy {
+        inherit: ShellEnvironmentPolicyInherit::None,
+        ..Default::default()
+    };
+    child_shell_environment_policy
+        .r#set
+        .insert("CODEXX_CHILD_ENV".to_string(), "child".to_string());
+    child_config.cwd = child_cwd.clone();
+    child_config.workspace_roots = vec![child_cwd.clone()];
+    child_config
+        .permissions
+        .set_workspace_roots(vec![child_cwd.clone()]);
+    child_config.permissions.shell_environment_policy = child_shell_environment_policy.clone();
+    child_config
+        .permissions
+        .approval_policy
+        .set(AskForApproval::Never)
+        .expect("child approval policy should be set");
+    child_config
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)
+        .expect("child permission profile should be set");
+    #[allow(deprecated)]
+    {
+        turn.cwd = child_cwd.clone();
+    }
+    turn.approval_policy
+        .set(AskForApproval::Never)
+        .expect("child turn approval policy should be set");
+    turn.permission_profile = PermissionProfile::Disabled;
+    turn.shell_environment_policy = child_shell_environment_policy.clone();
+    set_turn_config(&mut turn, child_config);
+
     let mut resume_turn = turn
         .with_model("gpt-parent".to_string(), &session.services.models_manager)
         .await;
     resume_turn.reasoning_effort = Some(ReasoningEffort::High);
     let mut resume_config = (*resume_turn.config).clone();
+    let mut parent_shell_environment_policy = ShellEnvironmentPolicy::default();
+    parent_shell_environment_policy
+        .r#set
+        .insert("CODEXX_PARENT_ENV".to_string(), "parent".to_string());
+    resume_config.cwd = parent_cwd.clone();
+    resume_config.workspace_roots = vec![parent_cwd.clone()];
+    resume_config
+        .permissions
+        .set_workspace_roots(vec![parent_cwd.clone()]);
+    resume_config.permissions.shell_environment_policy = parent_shell_environment_policy.clone();
+    resume_config
+        .permissions
+        .approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect("parent approval policy should be set");
+    resume_config
+        .permissions
+        .set_permission_profile(PermissionProfile::read_only())
+        .expect("parent permission profile should be set");
     resume_config.model_reasoning_effort = Some(ReasoningEffort::High);
+    #[allow(deprecated)]
+    {
+        resume_turn.cwd = parent_cwd;
+    }
+    resume_turn
+        .approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect("parent turn approval policy should be set");
+    resume_turn.permission_profile = PermissionProfile::read_only();
+    resume_turn.shell_environment_policy = parent_shell_environment_policy;
     set_turn_config(&mut resume_turn, resume_config);
 
     let session = Arc::new(session);
@@ -3025,9 +3400,277 @@ async fn codexx_resume_agent_resolves_task_name_and_preserves_child_model_and_ef
         .await;
     assert_eq!(snapshot.model, "gpt-5.4");
     assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Low));
+    assert_eq!(snapshot.approval_policy, AskForApproval::Never);
+    assert_eq!(snapshot.permission_profile, PermissionProfile::Disabled);
+    assert_eq!(snapshot.cwd, child_cwd);
+    assert_eq!(snapshot.workspace_roots, vec![child_cwd]);
+    assert_eq!(
+        snapshot.shell_environment_policy,
+        child_shell_environment_policy
+    );
     assert_eq!(
         snapshot.session_source.get_agent_path().as_deref(),
         Some("/root/resume_target")
+    );
+}
+
+#[tokio::test]
+async fn codexx_resume_agent_defaults_to_self_and_subtree_scope_restores_descendants() {
+    #[derive(Debug, Deserialize)]
+    struct ResumeAgentResult {
+        status: AgentStatus,
+    }
+
+    let (_session, turn) = make_session_and_context().await;
+    let mut config = turn.config.as_ref().clone();
+    config.agent_max_depth = 3;
+    config
+        .features
+        .enable(Feature::Sqlite)
+        .expect("test config should allow sqlite");
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow multi-agent v2");
+    let state_db = init_state_db(&config)
+        .await
+        .expect("sqlite state db should initialize");
+    let manager = ThreadManager::new(
+        &config,
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, Some(state_db.clone())),
+        Some(state_db.clone()),
+        "22222222-2222-4222-8222-222222222222".to_string(),
+        /*attestation_provider*/ None,
+    );
+
+    let root = manager
+        .start_thread(config)
+        .await
+        .expect("root thread should start");
+    let root_session = root.thread.codex.session.clone();
+    let root_agent_control = root_session.services.agent_control.clone();
+    CodexxSpawnAgentHandler::default()
+        .handle(invocation(
+            root_session.clone(),
+            root_session.new_default_turn().await,
+            "spawn_agent",
+            function_payload(json!({
+                "message": "hello parent",
+                "task_name": "parent",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("parent spawn should succeed");
+    let root_turn = root_session.new_default_turn().await;
+    let parent_thread_id = root_agent_control
+        .resolve_agent_reference(root.thread_id, &root_turn.session_source, "parent")
+        .await
+        .expect("parent should resolve");
+    let parent_thread = manager
+        .get_thread(parent_thread_id)
+        .await
+        .expect("parent thread should exist");
+    let parent_session = parent_thread.codex.session.clone();
+    CodexxSpawnAgentHandler::default()
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "spawn_agent",
+            function_payload(json!({
+                "message": "hello child",
+                "task_name": "child",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("child spawn should succeed");
+    let parent_turn = parent_session.new_default_turn().await;
+    let child_thread_id = root_agent_control
+        .resolve_agent_reference(parent_thread_id, &parent_turn.session_source, "child")
+        .await
+        .expect("child should resolve");
+    wait_for_state_thread(&state_db, parent_thread_id).await;
+    wait_for_state_thread(&state_db, child_thread_id).await;
+
+    for thread_id in [child_thread_id, parent_thread_id] {
+        root_agent_control
+            .shutdown_live_agent(thread_id)
+            .await
+            .expect("thread should shut down without closing its spawn edge");
+    }
+    assert_eq!(
+        root_agent_control.get_status(parent_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        root_agent_control.get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+
+    let self_output = CodexxResumeAgentHandler
+        .handle(invocation(
+            root_session.clone(),
+            root_session.new_default_turn().await,
+            "resume_agent",
+            function_payload(json!({"target": "parent"})),
+        ))
+        .await
+        .expect("default resume should restore the parent only");
+    let (self_content, _) = expect_text_output(self_output);
+    let self_result: ResumeAgentResult =
+        serde_json::from_str(&self_content).expect("resume result should be json");
+    assert_ne!(self_result.status, AgentStatus::NotFound);
+    assert_ne!(
+        root_agent_control.get_status(parent_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        root_agent_control.get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+
+    root_agent_control
+        .shutdown_live_agent(parent_thread_id)
+        .await
+        .expect("resumed parent should shut down without closing its spawn edge");
+
+    let subtree_output = CodexxResumeAgentHandler
+        .handle(invocation(
+            root_session.clone(),
+            root_session.new_default_turn().await,
+            "resume_agent",
+            function_payload(json!({
+                "target": "parent",
+                "resume_scope": "subtree"
+            })),
+        ))
+        .await
+        .expect("subtree resume should restore open descendants");
+    let (subtree_content, _) = expect_text_output(subtree_output);
+    let subtree_result: ResumeAgentResult =
+        serde_json::from_str(&subtree_content).expect("subtree resume result should be json");
+    assert_ne!(subtree_result.status, AgentStatus::NotFound);
+    assert_ne!(
+        root_agent_control.get_status(parent_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_ne!(
+        root_agent_control.get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    let child_snapshot = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("subtree resume should restore child thread")
+        .config_snapshot()
+        .await;
+    assert_eq!(
+        child_snapshot.session_source.get_agent_path().as_deref(),
+        Some("/root/parent/child")
+    );
+}
+
+#[tokio::test]
+async fn codexx_resume_agent_all_scope_restores_root_descendants() {
+    let (_session, turn) = make_session_and_context().await;
+    let mut config = turn.config.as_ref().clone();
+    config.agent_max_depth = 3;
+    config
+        .features
+        .enable(Feature::Sqlite)
+        .expect("test config should allow sqlite");
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow multi-agent v2");
+    let state_db = init_state_db(&config)
+        .await
+        .expect("sqlite state db should initialize");
+    let manager = ThreadManager::new(
+        &config,
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, Some(state_db.clone())),
+        Some(state_db.clone()),
+        "33333333-3333-4333-8333-333333333333".to_string(),
+        /*attestation_provider*/ None,
+    );
+
+    let root = manager
+        .start_thread(config)
+        .await
+        .expect("root thread should start");
+    let root_session = root.thread.codex.session.clone();
+    let root_agent_control = root_session.services.agent_control.clone();
+    for task_name in ["alpha", "beta"] {
+        CodexxSpawnAgentHandler::default()
+            .handle(invocation(
+                root_session.clone(),
+                root_session.new_default_turn().await,
+                "spawn_agent",
+                function_payload(json!({
+                    "message": format!("hello {task_name}"),
+                    "task_name": task_name,
+                    "fork_turns": "none"
+                })),
+            ))
+            .await
+            .expect("spawn should succeed");
+    }
+    let root_turn = root_session.new_default_turn().await;
+    let alpha_thread_id = root_agent_control
+        .resolve_agent_reference(root.thread_id, &root_turn.session_source, "alpha")
+        .await
+        .expect("alpha should resolve");
+    let beta_thread_id = root_agent_control
+        .resolve_agent_reference(root.thread_id, &root_turn.session_source, "beta")
+        .await
+        .expect("beta should resolve");
+    wait_for_state_thread(&state_db, alpha_thread_id).await;
+    wait_for_state_thread(&state_db, beta_thread_id).await;
+
+    root_agent_control
+        .shutdown_live_agent(alpha_thread_id)
+        .await
+        .expect("alpha should shut down");
+    assert_eq!(
+        root_agent_control.get_status(alpha_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_ne!(
+        root_agent_control.get_status(beta_thread_id).await,
+        AgentStatus::NotFound
+    );
+
+    CodexxResumeAgentHandler
+        .handle(invocation(
+            root_session.clone(),
+            root_session.new_default_turn().await,
+            "resume_agent",
+            function_payload(json!({
+                "target": "/root",
+                "resume_scope": "all"
+            })),
+        ))
+        .await
+        .expect("all scope should restore unloaded root descendants");
+
+    assert_ne!(
+        root_agent_control.get_status(alpha_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_ne!(
+        root_agent_control.get_status(beta_thread_id).await,
+        AgentStatus::NotFound
     );
 }
 
