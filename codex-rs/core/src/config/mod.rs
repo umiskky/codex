@@ -2254,6 +2254,7 @@ pub struct ConfigOverrides {
     pub approvals_reviewer: Option<ApprovalsReviewer>,
     pub sandbox_mode: Option<SandboxMode>,
     pub permission_profile: Option<PermissionProfile>,
+    pub active_permission_profile: Option<ActivePermissionProfile>,
     pub default_permissions: Option<String>,
     pub model_provider: Option<String>,
     pub service_tier: Option<Option<String>>,
@@ -2626,6 +2627,7 @@ impl Config {
             approvals_reviewer: approvals_reviewer_override,
             sandbox_mode,
             permission_profile,
+            active_permission_profile: active_permission_profile_override,
             default_permissions: default_permissions_override,
             model_provider,
             service_tier: service_tier_override,
@@ -2883,7 +2885,7 @@ impl Config {
                 configured_network_proxy_config,
                 permission_profile,
                 file_system_sandbox_policy,
-                None,
+                active_permission_profile_override,
                 Vec::new(),
             )
         } else if profiles_are_active {

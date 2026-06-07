@@ -1650,9 +1650,12 @@ fn apply_resume_config_from_turn_context(
     config.permissions.approval_policy = Constrained::allow_only(turn_context.approval_policy);
     if let Err(err) = config
         .permissions
-        .replace_permission_profile_from_session_snapshot(PermissionProfileSnapshot::legacy(
-            turn_context.permission_profile(),
-        ))
+        .replace_permission_profile_from_session_snapshot(
+            PermissionProfileSnapshot::from_session_snapshot(
+                turn_context.permission_profile(),
+                turn_context.active_permission_profile.clone(),
+            ),
+        )
     {
         warn!("failed to restore child permission profile from rollout: {err}");
     }
@@ -1678,9 +1681,12 @@ fn apply_known_agent_config(
     config.permissions.approval_policy = Constrained::allow_only(known_config.approval_policy);
     if let Err(err) = config
         .permissions
-        .replace_permission_profile_from_session_snapshot(PermissionProfileSnapshot::legacy(
-            known_config.permission_profile.clone(),
-        ))
+        .replace_permission_profile_from_session_snapshot(
+            PermissionProfileSnapshot::from_session_snapshot(
+                known_config.permission_profile.clone(),
+                known_config.active_permission_profile.clone(),
+            ),
+        )
     {
         warn!("failed to restore known child permission profile: {err}");
     }

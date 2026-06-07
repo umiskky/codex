@@ -15,8 +15,11 @@ use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::models::ActivePermissionProfile;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
@@ -79,6 +82,7 @@ async fn resume_config_uses_latest_rollout_turn_context_model_and_effort() {
             approval_policy: AskForApproval::Never,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
             permission_profile: None,
+            active_permission_profile: None,
             network: None,
             file_system_sandbox_policy: None,
             model: "gpt-child".to_string(),
@@ -95,6 +99,59 @@ async fn resume_config_uses_latest_rollout_turn_context_model_and_effort() {
     assert_eq!(
         config.model_reasoning_effort,
         Some(ReasoningEffort::Minimal)
+    );
+}
+
+#[tokio::test]
+async fn resume_config_full_runtime_preserves_rollout_permission_profile_identity() {
+    let (_home, mut config) = test_config().await;
+    config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+    config
+        .permissions
+        .set_permission_profile(PermissionProfile::read_only())
+        .expect("set parent permission profile");
+    let cwd = config.cwd.to_path_buf();
+
+    apply_resume_config_from_rollout_history_with_mode(
+        &mut config,
+        &[RolloutItem::TurnContext(TurnContextItem {
+            turn_id: None,
+            cwd,
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: Some(PermissionProfile::Disabled),
+            active_permission_profile: Some(ActivePermissionProfile::new(
+                BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS,
+            )),
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "gpt-child".to_string(),
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            realtime_active: None,
+            effort: Some(ReasoningEffort::High),
+            summary: ReasoningSummary::Auto,
+        })],
+        ResumeConfigRestoreMode::FullRuntime,
+    );
+
+    assert_eq!(
+        config.permissions.approval_policy.value(),
+        AskForApproval::Never
+    );
+    assert_eq!(
+        config.permissions.permission_profile(),
+        &PermissionProfile::Disabled
+    );
+    assert_eq!(
+        config.permissions.active_permission_profile(),
+        Some(ActivePermissionProfile::new(
+            BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS,
+        ))
     );
 }
 

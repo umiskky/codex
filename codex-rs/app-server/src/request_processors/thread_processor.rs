@@ -149,6 +149,7 @@ fn collect_resume_override_mismatches(
 fn merge_persisted_resume_metadata(
     request_overrides: &mut Option<HashMap<String, serde_json::Value>>,
     typesafe_overrides: &mut ConfigOverrides,
+    rollout_turn_context: Option<&codex_protocol::protocol::TurnContextItem>,
     persisted_metadata: &ThreadMetadata,
 ) {
     if !has_model_resume_override(request_overrides.as_ref(), typesafe_overrides) {
@@ -164,7 +165,33 @@ fn merge_persisted_resume_metadata(
     }
 
     if !has_permission_resume_override(request_overrides.as_ref(), typesafe_overrides) {
-        apply_persisted_resume_permissions(typesafe_overrides, persisted_metadata);
+        apply_persisted_resume_permissions(
+            typesafe_overrides,
+            rollout_turn_context,
+            persisted_metadata,
+        );
+    }
+}
+
+fn latest_turn_context_from_initial_history(
+    thread_history: &InitialHistory,
+) -> Option<&codex_protocol::protocol::TurnContextItem> {
+    match thread_history {
+        InitialHistory::New | InitialHistory::Cleared => None,
+        InitialHistory::Resumed(resumed) => resumed.history.iter().rev().find_map(|item| {
+            if let RolloutItem::TurnContext(turn_context) = item {
+                Some(turn_context)
+            } else {
+                None
+            }
+        }),
+        InitialHistory::Forked(items) => items.iter().rev().find_map(|item| {
+            if let RolloutItem::TurnContext(turn_context) = item {
+                Some(turn_context)
+            } else {
+                None
+            }
+        }),
     }
 }
 
@@ -211,6 +238,7 @@ fn has_permission_resume_override(
         || typesafe_overrides.approvals_reviewer.is_some()
         || typesafe_overrides.sandbox_mode.is_some()
         || typesafe_overrides.permission_profile.is_some()
+        || typesafe_overrides.active_permission_profile.is_some()
         || typesafe_overrides.default_permissions.is_some()
         || request_overrides.is_some_and(|overrides| {
             overrides.contains_key("approval_policy")
@@ -223,8 +251,17 @@ fn has_permission_resume_override(
 
 fn apply_persisted_resume_permissions(
     typesafe_overrides: &mut ConfigOverrides,
+    rollout_turn_context: Option<&codex_protocol::protocol::TurnContextItem>,
     persisted_metadata: &ThreadMetadata,
 ) {
+    if let Some(turn_context) = rollout_turn_context {
+        typesafe_overrides.approval_policy = Some(turn_context.approval_policy);
+        typesafe_overrides.permission_profile = Some(turn_context.permission_profile());
+        typesafe_overrides.active_permission_profile =
+            turn_context.active_permission_profile.clone();
+        return;
+    }
+
     match serde_json::from_value::<codex_protocol::protocol::AskForApproval>(
         serde_json::Value::String(persisted_metadata.approval_mode.clone()),
     ) {
@@ -2835,7 +2872,13 @@ impl ThreadRequestProcessor {
             .await
             .ok()
             .flatten()?;
-        merge_persisted_resume_metadata(request_overrides, typesafe_overrides, &persisted_metadata);
+        let rollout_turn_context = latest_turn_context_from_initial_history(thread_history);
+        merge_persisted_resume_metadata(
+            request_overrides,
+            typesafe_overrides,
+            rollout_turn_context,
+            &persisted_metadata,
+        );
         Some(persisted_metadata)
     }
 

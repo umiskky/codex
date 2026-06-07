@@ -2551,6 +2551,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         approval_policy: turn_context.approval_policy.value(),
         sandbox_policy: turn_context.sandbox_policy(),
         permission_profile: None,
+        active_permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
         model: previous_model.to_string(),

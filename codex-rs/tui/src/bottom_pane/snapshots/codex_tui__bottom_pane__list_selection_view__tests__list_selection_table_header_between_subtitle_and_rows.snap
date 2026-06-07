@@ -1,0 +1,11 @@
+---
+source: tui/src/bottom_pane/list_selection_view.rs
+assertion_line: 1593
+expression: "render_lines_with_width(&view, 64)"
+---
+                                                                
+  Subagents                                                     
+  Select an agent.                                              
+                                                                
+  STATUS   TASK      THREAD                                     
+› 1. open     root      019ea01e

@@ -111,7 +111,7 @@ impl App {
             is_searchable: true,
             col_width_mode: ColumnWidthMode::AutoAllRows,
             row_display: SelectionRowDisplay::SingleLine,
-            header: Box::new(agent_table_header_line()),
+            list_header: Box::new(agent_table_header_line()),
             ..Default::default()
         });
     }
@@ -166,7 +166,7 @@ impl App {
             is_searchable: true,
             col_width_mode: ColumnWidthMode::AutoAllRows,
             row_display: SelectionRowDisplay::SingleLine,
-            header: Box::new(agent_table_header_line()),
+            list_header: Box::new(agent_table_header_line()),
             ..Default::default()
         });
     }

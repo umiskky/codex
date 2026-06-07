@@ -34,6 +34,7 @@ fn resume_history(
         approval_policy: config.permissions.approval_policy.value(),
         sandbox_policy: config.legacy_sandbox_policy(),
         permission_profile: None,
+        active_permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
         model: previous_model.to_string(),

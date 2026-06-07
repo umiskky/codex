@@ -412,6 +412,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         approvals_reviewer: None,
         sandbox_mode,
         permission_profile: None,
+        active_permission_profile: None,
         default_permissions: None,
         cwd: resolved_cwd,
         workspace_roots: None,

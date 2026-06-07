@@ -175,6 +175,7 @@ pub(crate) struct SelectionViewParams {
     /// Rendered left-column width to use for auto-sized rows.
     pub name_column_width: Option<usize>,
     pub header: Box<dyn Renderable>,
+    pub list_header: Box<dyn Renderable>,
     pub initial_selected_idx: Option<usize>,
 
     /// Rich content rendered beside (wide terminals) or below (narrow terminals)
@@ -222,6 +223,7 @@ impl Default for SelectionViewParams {
             row_display: SelectionRowDisplay::Wrapped,
             name_column_width: None,
             header: Box::new(()),
+            list_header: Box::new(()),
             initial_selected_idx: None,
             side_content: Box::new(()),
             side_content_width: SideContentWidth::default(),
@@ -260,6 +262,7 @@ pub(crate) struct ListSelectionView {
     filtered_indices: Vec<usize>,
     last_selected_actual_idx: Option<usize>,
     header: Box<dyn Renderable>,
+    list_header: Box<dyn Renderable>,
     initial_selected_idx: Option<usize>,
     side_content: Box<dyn Renderable>,
     side_content_width: SideContentWidth,
@@ -335,6 +338,7 @@ impl ListSelectionView {
             filtered_indices: Vec::new(),
             last_selected_actual_idx: None,
             header,
+            list_header: params.list_header,
             initial_selected_idx: params.initial_selected_idx,
             side_content: params.side_content,
             side_content_width: params.side_content_width,
@@ -1099,9 +1103,10 @@ impl Renderable for ListSelectionView {
 
         let header = self.active_header();
         let tab_height = tab_bar_height(&self.tabs, self.active_tab_idx.unwrap_or(0), inner_width);
+        let list_header_height = self.list_header.desired_height(effective_rows_width);
         let mut height = header.desired_height(inner_width);
         height = height.saturating_add(tab_height + u16::from(tab_height > 0));
-        height = height.saturating_add(rows_height + 3);
+        height = height.saturating_add(list_header_height + rows_height + 3);
         if self.is_searchable {
             height = height.saturating_add(1);
         }
@@ -1162,6 +1167,7 @@ impl Renderable for ListSelectionView {
         let header = self.active_header();
         let header_height = header.desired_height(inner_width);
         let tab_height = tab_bar_height(&self.tabs, self.active_tab_idx.unwrap_or(0), inner_width);
+        let list_header_height = self.list_header.desired_height(effective_rows_width);
         let rows = self.build_rows();
         let column_width = ColumnWidthConfig::new(self.col_width_mode, self.name_column_width);
         let rows_height = match self.row_display {
@@ -1189,6 +1195,7 @@ impl Renderable for ListSelectionView {
             tabs_area,
             _,
             search_area,
+            list_header_area,
             list_area,
             _,
             stacked_side_area,
@@ -1198,6 +1205,7 @@ impl Renderable for ListSelectionView {
             Constraint::Length(tab_height),
             Constraint::Length(u16::from(tab_height > 0)),
             Constraint::Length(if self.is_searchable { 1 } else { 0 }),
+            Constraint::Length(list_header_height),
             Constraint::Length(rows_height),
             Constraint::Length(stacked_gap),
             Constraint::Length(stacked_side_h),
@@ -1234,6 +1242,19 @@ impl Renderable for ListSelectionView {
                 self.search_query.clone().into()
             };
             Line::from(query_span).render(search_area, buf);
+        }
+
+        // -- List header --
+        if list_header_area.height > 0 {
+            self.list_header.render(
+                Rect {
+                    x: list_header_area.x.saturating_sub(2),
+                    y: list_header_area.y,
+                    width: effective_rows_width.max(1),
+                    height: list_header_area.height,
+                },
+                buf,
+            );
         }
 
         // -- List rows --
@@ -1547,6 +1568,32 @@ mod tests {
     fn renders_blank_line_between_subtitle_and_items() {
         let view = make_selection_view(Some("Switch between Codex approval presets"));
         assert_snapshot!("list_selection_spacing_with_subtitle", render_lines(&view));
+    }
+
+    #[test]
+    fn table_header_renders_between_subtitle_and_rows() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let view = new_view(
+            SelectionViewParams {
+                title: Some("Subagents".to_string()),
+                subtitle: Some("Select an agent.".to_string()),
+                list_header: Box::new(Line::from("  STATUS   TASK      THREAD")),
+                items: vec![SelectionItem {
+                    name: "open     root      019ea01e".to_string(),
+                    dismiss_on_select: true,
+                    ..Default::default()
+                }],
+                row_display: SelectionRowDisplay::SingleLine,
+                ..Default::default()
+            },
+            tx,
+        );
+
+        assert_snapshot!(
+            "list_selection_table_header_between_subtitle_and_rows",
+            render_lines_with_width(&view, /*width*/ 64)
+        );
     }
 
     #[test]

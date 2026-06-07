@@ -65,6 +65,8 @@ mod thread_processor_behavior_tests {
     use codex_protocol::config_types::CollaborationMode;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::config_types::Settings;
+    use codex_protocol::config_types::ShellEnvironmentPolicy;
+    use codex_protocol::models::ActivePermissionProfile;
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
@@ -75,8 +77,10 @@ mod thread_processor_behavior_tests {
     use codex_protocol::permissions::FileSystemSandboxEntry;
     use codex_protocol::permissions::NetworkSandboxPolicy;
     use codex_protocol::protocol::AskForApproval;
+    use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SubAgentSource;
+    use codex_protocol::protocol::TurnContextItem;
     use codex_state::ThreadMetadataBuilder;
     use codex_thread_store::StoredThread;
     use codex_utils_absolute_path::test_support::PathBufExt;
@@ -688,6 +692,7 @@ mod thread_processor_behavior_tests {
             cwd,
             workspace_roots: Vec::new(),
             profile_workspace_roots: Vec::new(),
+            shell_environment_policy: ShellEnvironmentPolicy::default(),
             ephemeral: false,
             reasoning_effort: None,
             reasoning_summary: None,
@@ -756,6 +761,7 @@ mod thread_processor_behavior_tests {
         merge_persisted_resume_metadata(
             &mut request_overrides,
             &mut typesafe_overrides,
+            /*rollout_turn_context*/ None,
             &persisted_metadata,
         );
 
@@ -778,6 +784,61 @@ mod thread_processor_behavior_tests {
     }
 
     #[test]
+    fn merge_persisted_resume_metadata_prefers_rollout_permissions() -> Result<()> {
+        let mut request_overrides = None;
+        let mut typesafe_overrides = ConfigOverrides::default();
+        let mut persisted_metadata =
+            test_thread_metadata(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High))?;
+        persisted_metadata.approval_mode = AskForApproval::OnRequest.to_string();
+        persisted_metadata.sandbox_policy = serde_json::to_string(&PermissionProfile::read_only())?;
+        let rollout_turn_context = TurnContextItem {
+            turn_id: None,
+            cwd: test_path_buf("/tmp/agent").abs().into_path_buf(),
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            permission_profile: Some(PermissionProfile::Disabled),
+            active_permission_profile: Some(ActivePermissionProfile::new(
+                BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS,
+            )),
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "gpt-5.1-codex-max".to_string(),
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            realtime_active: None,
+            effort: Some(ReasoningEffort::High),
+            summary: codex_protocol::config_types::ReasoningSummary::Auto,
+        };
+
+        merge_persisted_resume_metadata(
+            &mut request_overrides,
+            &mut typesafe_overrides,
+            Some(&rollout_turn_context),
+            &persisted_metadata,
+        );
+
+        assert_eq!(
+            typesafe_overrides.approval_policy,
+            Some(AskForApproval::Never)
+        );
+        assert_eq!(
+            typesafe_overrides.permission_profile,
+            Some(PermissionProfile::Disabled)
+        );
+        assert_eq!(
+            typesafe_overrides.active_permission_profile,
+            Some(ActivePermissionProfile::new(
+                BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS,
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn merge_persisted_resume_metadata_preserves_explicit_overrides() -> Result<()> {
         let mut request_overrides = Some(HashMap::from([(
             "model_reasoning_effort".to_string(),
@@ -793,6 +854,7 @@ mod thread_processor_behavior_tests {
         merge_persisted_resume_metadata(
             &mut request_overrides,
             &mut typesafe_overrides,
+            /*rollout_turn_context*/ None,
             &persisted_metadata,
         );
 
@@ -822,6 +884,7 @@ mod thread_processor_behavior_tests {
         merge_persisted_resume_metadata(
             &mut request_overrides,
             &mut typesafe_overrides,
+            /*rollout_turn_context*/ None,
             &persisted_metadata,
         );
 
@@ -851,6 +914,7 @@ mod thread_processor_behavior_tests {
         merge_persisted_resume_metadata(
             &mut request_overrides,
             &mut typesafe_overrides,
+            /*rollout_turn_context*/ None,
             &persisted_metadata,
         );
 
@@ -874,6 +938,7 @@ mod thread_processor_behavior_tests {
         merge_persisted_resume_metadata(
             &mut request_overrides,
             &mut typesafe_overrides,
+            /*rollout_turn_context*/ None,
             &persisted_metadata,
         );
 
@@ -899,6 +964,7 @@ mod thread_processor_behavior_tests {
         merge_persisted_resume_metadata(
             &mut request_overrides,
             &mut typesafe_overrides,
+            /*rollout_turn_context*/ None,
             &persisted_metadata,
         );
 

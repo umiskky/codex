@@ -175,6 +175,7 @@ fn turn_context_item_filesystem_uses_workspace_roots_instead_of_cwd() {
         approval_policy: AskForApproval::Never,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         permission_profile: Some(workspace_write_permission_profile_with_private_denials()),
+        active_permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
         model: "gpt-5".to_string(),
