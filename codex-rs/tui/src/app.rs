@@ -1059,6 +1059,23 @@ See the Codex keymap documentation for supported actions and examples."
         }
         let initial_session_ms = initial_session_started_at.elapsed().as_millis();
 
+        let status_ipc = match crate::status_ipc::StatusIpcServer::start(
+            crate::status_ipc::StatusIpcServerArgs {
+                codex_home: app.config.codex_home.to_path_buf(),
+                cwd: app.config.cwd.to_path_buf(),
+                root_thread_id: app.primary_thread_id.map(|thread_id| thread_id.to_string()),
+                session_id: None,
+                version: CODEX_CLI_VERSION.to_string(),
+                request_handle: app_server.request_handle(),
+            },
+        ) {
+            Ok(server) => Some(server),
+            Err(err) => {
+                tracing::warn!("failed to start codexx status IPC: {err}");
+                None
+            }
+        };
+
         // On startup, if a managed filesystem sandbox is active, warn about
         // world-writable dirs on Windows.
         #[cfg(target_os = "windows")]
@@ -1198,6 +1215,7 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
         };
+        drop(status_ipc);
         if let Err(err) = app_server.shutdown().await {
             tracing::warn!(error = %err, "failed to shut down embedded app server");
         }

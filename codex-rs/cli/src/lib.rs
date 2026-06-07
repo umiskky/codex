@@ -1,6 +1,7 @@
 pub(crate) mod debug_sandbox;
 mod exit_status;
 pub(crate) mod login;
+pub mod status_command;
 
 use clap::Parser;
 use codex_utils_absolute_path::AbsolutePathBuf;

@@ -181,6 +181,7 @@ mod startup_error;
 mod startup_hooks_review;
 mod status;
 mod status_indicator_widget;
+pub mod status_ipc;
 mod streaming;
 mod style;
 mod terminal_hyperlinks;
