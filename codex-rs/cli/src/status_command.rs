@@ -10,6 +10,7 @@ use codex_tui::status_ipc::StatusMetadata;
 use codex_tui::status_ipc::StatusSummary;
 use codex_tui::status_ipc::default_codex_home;
 use codex_tui::status_ipc::read_metadata_file;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::fs;
@@ -25,12 +26,20 @@ const STATUS_IPC_TIMEOUT: Duration = Duration::from_millis(750);
 const NO_LIVE_TUI_MESSAGE: &str = "No live codexx TUI sessions found.";
 
 #[derive(Debug, Args, Clone)]
-pub struct StatusCommand {}
+pub struct StatusCommand {
+    /// Print machine-readable JSON instead of the default table.
+    #[arg(long)]
+    pub json: bool,
+}
 
-pub async fn run_status_command(_command: StatusCommand) -> anyhow::Result<()> {
+pub async fn run_status_command(command: StatusCommand) -> anyhow::Result<()> {
     let codex_home = default_codex_home().context("failed to resolve CODEX_HOME")?;
     let mut stdout = std::io::stdout();
-    run_status_command_with_codex_home(&codex_home, &mut stdout).await
+    if command.json {
+        run_status_command_with_codex_home_json(&codex_home, &mut stdout).await
+    } else {
+        run_status_command_with_codex_home(&codex_home, &mut stdout).await
+    }
 }
 
 pub async fn run_status_command_with_codex_home(
@@ -38,6 +47,21 @@ pub async fn run_status_command_with_codex_home(
     writer: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let sessions = live_status_sessions(codex_home)?;
+    write_status_table(writer, &sessions)
+}
+
+pub async fn run_status_command_with_codex_home_json(
+    codex_home: &Path,
+    writer: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let sessions = live_status_sessions(codex_home)?;
+    write_status_json(writer, &sessions)
+}
+
+fn write_status_table(
+    writer: &mut dyn Write,
+    sessions: &[LiveStatusSession],
+) -> anyhow::Result<()> {
     if sessions.is_empty() {
         writeln!(writer, "{NO_LIVE_TUI_MESSAGE}")?;
         return Ok(());
@@ -45,10 +69,10 @@ pub async fn run_status_command_with_codex_home(
 
     writeln!(
         writer,
-        "{:<8}  {:<9}  {:<12}  {:<36}  {:<24}  {:<16}  {:<12}  {:<14}  SUMMARY",
+        "{:<8}  {:<16}  {:<16}  {:<36}  {:<24}  {:<16}  {:<12}  {:<14}  SUMMARY",
         "TUI_PID",
-        "TUI_STATE",
-        "THREAD_STATE",
+        "TUI_WORK",
+        "THREAD_WORK",
         "THREAD_ID",
         "AGENT_PATH",
         "TASK_NAME",
@@ -57,15 +81,16 @@ pub async fn run_status_command_with_codex_home(
     )?;
     for session in sessions {
         let mut rows = Vec::new();
-        for root in session.tree.roots {
-            collect_rows(session.summary.pid, &root, &mut rows);
+        for root in &session.tree.roots {
+            collect_rows(session.summary.pid, root, &mut rows);
         }
+        let session_work = session_work_state(&session.summary, &rows);
         if rows.is_empty() {
             writeln!(
                 writer,
-                "{:<8}  {:<9}  {:<12}  {:<36}  {:<24}  {:<16}  {:<12}  {:<14}  {}",
+                "{:<8}  {:<16}  {:<16}  {:<36}  {:<24}  {:<16}  {:<12}  {:<14}  {}",
                 session.summary.pid,
-                "alive",
+                session_work,
                 "-",
                 session.summary.root_thread_id.as_deref().unwrap_or("-"),
                 "/root",
@@ -77,12 +102,13 @@ pub async fn run_status_command_with_codex_home(
             continue;
         }
         for row in rows {
+            let thread_work = thread_work_state(&row.thread_state, &row.active_flags);
             writeln!(
                 writer,
-                "{:<8}  {:<9}  {:<12}  {:<36}  {:<24}  {:<16}  {:<12}  {:<14}  {}",
+                "{:<8}  {:<16}  {:<16}  {:<36}  {:<24}  {:<16}  {:<12}  {:<14}  {}",
                 row.pid,
-                "alive",
-                truncate(&row.thread_state, 12),
+                session_work,
+                thread_work,
                 row.thread_id,
                 truncate(row.agent_path.as_deref().unwrap_or("-"), 24),
                 truncate(row.task_name.as_deref().unwrap_or("-"), 16),
@@ -95,9 +121,84 @@ pub async fn run_status_command_with_codex_home(
     Ok(())
 }
 
+fn write_status_json(writer: &mut dyn Write, sessions: &[LiveStatusSession]) -> anyhow::Result<()> {
+    let output = StatusJsonOutput {
+        sessions: sessions
+            .iter()
+            .map(|session| {
+                let mut rows = Vec::new();
+                for root in &session.tree.roots {
+                    collect_rows(session.summary.pid, root, &mut rows);
+                }
+                let tui_work = session_work_state(&session.summary, &rows);
+                StatusJsonSession {
+                    pid: session.summary.pid,
+                    tui_state: "alive".to_string(),
+                    tui_work,
+                    summary: session.summary.clone(),
+                    threads: rows.iter().map(StatusJsonThread::from_row).collect(),
+                    agent_tree: session.tree.clone(),
+                }
+            })
+            .collect(),
+    };
+    serde_json::to_writer_pretty(&mut *writer, &output)?;
+    writeln!(writer)?;
+    Ok(())
+}
+
 struct LiveStatusSession {
     summary: StatusSummary,
     tree: AgentTreeResponse,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusJsonOutput {
+    sessions: Vec<StatusJsonSession>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusJsonSession {
+    pid: u32,
+    tui_state: String,
+    tui_work: String,
+    summary: StatusSummary,
+    threads: Vec<StatusJsonThread>,
+    agent_tree: AgentTreeResponse,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusJsonThread {
+    pid: u32,
+    thread_work: String,
+    thread_state: String,
+    active_flags: Vec<String>,
+    thread_id: String,
+    agent_path: Option<String>,
+    task_name: Option<String>,
+    agent_type: Option<String>,
+    nickname: Option<String>,
+    summary: Option<String>,
+}
+
+impl StatusJsonThread {
+    fn from_row(row: &StatusRow) -> Self {
+        Self {
+            pid: row.pid,
+            thread_work: thread_work_state(&row.thread_state, &row.active_flags),
+            thread_state: row.thread_state.clone(),
+            active_flags: row.active_flags.clone(),
+            thread_id: row.thread_id.clone(),
+            agent_path: row.agent_path.clone(),
+            task_name: row.task_name.clone(),
+            agent_type: row.agent_type.clone(),
+            nickname: row.nickname.clone(),
+            summary: row.summary.clone(),
+        }
+    }
 }
 
 fn live_status_sessions(codex_home: &Path) -> anyhow::Result<Vec<LiveStatusSession>> {
@@ -224,6 +325,7 @@ fn pid_exists(_pid: u32) -> bool {
 struct StatusRow {
     pid: u32,
     thread_state: String,
+    active_flags: Vec<String>,
     thread_id: String,
     agent_path: Option<String>,
     task_name: Option<String>,
@@ -236,6 +338,7 @@ fn collect_rows(pid: u32, node: &AgentTreeNode, rows: &mut Vec<StatusRow>) {
     rows.push(StatusRow {
         pid,
         thread_state: node.status.clone(),
+        active_flags: node.active_flags.clone(),
         thread_id: node.thread_id.clone(),
         agent_path: node.agent_path.clone(),
         task_name: node.task_name.clone(),
@@ -246,6 +349,51 @@ fn collect_rows(pid: u32, node: &AgentTreeNode, rows: &mut Vec<StatusRow>) {
     for child in &node.children {
         collect_rows(pid, child, rows);
     }
+}
+
+fn session_work_state(summary: &StatusSummary, rows: &[StatusRow]) -> String {
+    let row_states = rows
+        .iter()
+        .map(|row| thread_work_state(&row.thread_state, &row.active_flags))
+        .collect::<Vec<_>>();
+    if row_states.iter().any(|state| state == "working") {
+        return "working".to_string();
+    }
+    if row_states.iter().any(|state| state == "waiting_approval") {
+        return "waiting_approval".to_string();
+    }
+    if row_states.iter().any(|state| state == "waiting_input") {
+        return "waiting_input".to_string();
+    }
+    if row_states.iter().any(|state| state == "waiting") {
+        return "waiting".to_string();
+    }
+    if summary.active_thread_count > 0 {
+        return "working".to_string();
+    }
+    "idle".to_string()
+}
+
+fn thread_work_state(thread_state: &str, active_flags: &[String]) -> String {
+    if thread_state != "active" {
+        return thread_state.to_string();
+    }
+    if active_flags
+        .iter()
+        .any(|flag| flag == "waiting_on_approval")
+    {
+        return "waiting_approval".to_string();
+    }
+    if active_flags
+        .iter()
+        .any(|flag| flag == "waiting_on_user_input")
+    {
+        return "waiting_input".to_string();
+    }
+    if !active_flags.is_empty() {
+        return "waiting".to_string();
+    }
+    "working".to_string()
 }
 
 fn truncate(value: &str, width: usize) -> String {
