@@ -2307,6 +2307,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "unicode-segmentation",
+ "unicode-width 0.2.1",
  "url",
  "which 8.0.0",
  "windows-sys 0.52.0",

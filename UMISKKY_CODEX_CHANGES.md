@@ -17,6 +17,111 @@ sudo install -m 0755 target/release/codex /usr/local/bin/codexx
 the whole release build. It does not change the feature surface; it mainly affects binary
 size and optimization.
 
+## Codexx TUI Status IPC
+
+Codexx TUI sessions expose a read-only status IPC so a separate
+`codexx status` process can inspect live TUI state without attaching to the
+in-process app-server runtime or starting an app-server daemon.
+
+At TUI startup, codexx creates status files under:
+
+```text
+$CODEX_HOME/tui-status/
+```
+
+The status directory is user-private on Unix (`0700`). Each live TUI process
+uses its pid for both files:
+
+```text
+$CODEX_HOME/tui-status/<pid>.json
+$CODEX_HOME/tui-status/<pid>.sock
+```
+
+The metadata JSON contains at least:
+
+- `pid`
+- `cwd`
+- `root_thread_id`
+- `session_id`
+- `socket_path`
+- `started_at`
+- `version`
+
+The socket protocol is JSON-line based and read-only. It exposes only:
+
+- `status/summary`
+- `thread/loaded/list`
+- `thread/read`
+- `agent/tree`
+
+The IPC deliberately does not expose spawn, resume, send, close, or other
+mutating operations. It reads live state through the TUI's existing app-server
+request handle, so thread status matches the in-process app-server view.
+
+TUI normal shutdown removes its socket and metadata. `codexx status` tolerates
+stale files: dead-pid metadata is cleaned up, while live pids with unreachable
+or unresponsive sockets are skipped without failing the command.
+
+### `codexx status`
+
+`codexx status` scans `$CODEX_HOME/tui-status/*.json`, connects to each live
+socket, and prints all reachable TUI sessions. If no live sessions are
+reachable it prints:
+
+```text
+No live codexx TUI sessions found.
+```
+
+The table includes the TUI pid, TUI work state, per-thread work state, thread id,
+canonical agent path, task name, agent type, nickname, and summary:
+
+```text
+TUI_PID  TUI_WORK  THREAD_WORK  THREAD_ID  AGENT_PATH  TASK_NAME  AGENT_TYPE  NICKNAME  SUMMARY
+```
+
+The `SUMMARY` column is bounded to 32 display columns. Long summaries wrap inside that
+column for at most two physical lines and then use `...`; continuation lines keep the same
+table width instead of expanding sideways. Other columns are fixed-width and truncated
+with `...` when needed.
+
+`codexx status --json` prints a machine-readable payload instead of the table. It keeps
+the full untruncated summaries and includes `sessions`, `sessions[].tuiWork`,
+`sessions[].threads[].threadWork`, live summary metadata, and `agentTree`. With no live
+TUI sessions it prints:
+
+```json
+{
+  "sessions": []
+}
+```
+
+Thread state comes from app-server `ThreadStatus`:
+
+- `active` means the thread is currently running a turn or waiting on approval
+  or user input.
+- `idle` means the thread is loaded but has no active turn.
+- `not_loaded` means historical state exists but the thread is not loaded in
+  this TUI process.
+- `system_error` means the app-server reported a runtime error for the thread.
+
+The IPC also carries `active_flags`, currently including:
+
+- `waiting_on_approval`
+- `waiting_on_user_input`
+
+These flags are the reliable way to distinguish a model/tool turn that is
+actually working from an active thread that is blocked waiting for the user or
+approval.
+
+The displayed work-state mapping is:
+
+- `working`: an active thread with no waiting flags, or a TUI with at least one working
+  thread.
+- `waiting_approval`: active but waiting on approval.
+- `waiting_input`: active but waiting on user input.
+- `idle`: loaded but no active turn.
+- `not_loaded` / `system_error`: direct app-server states when reported.
+
 ## Multi-Agent Changes
 
 Official `multi_agent_v1` and the official v2 top-level tools remain compatibility code.
@@ -207,6 +312,8 @@ cargo check -p codex-core
 CARGO_BUILD_JOBS=3 cargo check -p codex-app-server
 CARGO_BUILD_JOBS=3 cargo check -p codex-tui
 RUST_MIN_STACK=8388608 CARGO_BUILD_JOBS=3 cargo nextest run -p codex-core codexx_
+CARGO_BUILD_JOBS=6 cargo test -p codex-tui status_ipc
+CARGO_BUILD_JOBS=6 cargo test -p codex-cli status_command
 CARGO_BUILD_JOBS=3 cargo test -p codex-tui parse_agent_new_prompt_requires_task_and_message
 CARGO_BUILD_JOBS=6 cargo test -p codex-tui codexx_agent_picker_
 CARGO_BUILD_JOBS=3 cargo test -p codex-tui permissions_selection_shows_custom_current_when_no_builtin_preset_matches

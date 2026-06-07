@@ -212,6 +212,26 @@ async fn status_command_json_outputs_sessions_threads_and_work_state() {
     );
 }
 
+#[tokio::test]
+async fn status_command_wraps_summary_inside_column_boundary() {
+    let codex_home = tempfile::tempdir().expect("create temp codex home");
+    write_mock_metadata_and_start_status_server(codex_home.path());
+
+    let mut output = Vec::new();
+    run_status_command_with_codex_home(codex_home.path(), &mut output)
+        .await
+        .expect("status command succeeds with live mock IPC");
+
+    let output = String::from_utf8(output).expect("valid utf8");
+    for line in output.lines() {
+        assert!(
+            display_width(line) <= STATUS_TABLE_WIDTH,
+            "line exceeds table boundary: {line}"
+        );
+    }
+    assert!(output.contains("..."));
+}
+
 fn write_mock_metadata_and_start_status_server(codex_home: &Path) -> u32 {
     let status_dir = codex_home.join("tui-status");
     fs::create_dir_all(&status_dir).expect("create status dir");
@@ -315,7 +335,12 @@ fn mock_status_response(pid: u32, method: &str) -> StatusIpcResponse {
                         task_name: Some("coder".to_string()),
                         agent_type: Some("coder".to_string()),
                         agent_nickname: Some("coder_a".to_string()),
-                        summary: Some("actively working".to_string()),
+                        summary: Some(
+                            "This is a deliberately long summary that should wrap inside the \
+                             fixed summary table column instead of making the status table grow \
+                             sideways beyond the summary boundary."
+                                .to_string(),
+                        ),
                         children: Vec::new(),
                     },
                 ],

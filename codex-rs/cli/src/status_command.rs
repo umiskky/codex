@@ -21,9 +21,33 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
+use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 const STATUS_IPC_TIMEOUT: Duration = Duration::from_millis(750);
 const NO_LIVE_TUI_MESSAGE: &str = "No live codexx TUI sessions found.";
+const COLUMN_SEPARATOR: &str = "  ";
+const PID_WIDTH: usize = 8;
+const TUI_WORK_WIDTH: usize = 16;
+const THREAD_WORK_WIDTH: usize = 16;
+const THREAD_ID_WIDTH: usize = 36;
+const AGENT_PATH_WIDTH: usize = 24;
+const TASK_NAME_WIDTH: usize = 16;
+const AGENT_TYPE_WIDTH: usize = 12;
+const NICKNAME_WIDTH: usize = 14;
+const SUMMARY_WIDTH: usize = 32;
+const SUMMARY_MAX_LINES: usize = 2;
+#[cfg(test)]
+const STATUS_TABLE_WIDTH: usize = PID_WIDTH
+    + TUI_WORK_WIDTH
+    + THREAD_WORK_WIDTH
+    + THREAD_ID_WIDTH
+    + AGENT_PATH_WIDTH
+    + TASK_NAME_WIDTH
+    + AGENT_TYPE_WIDTH
+    + NICKNAME_WIDTH
+    + SUMMARY_WIDTH
+    + (8 * COLUMN_SEPARATOR.len());
 
 #[derive(Debug, Args, Clone)]
 pub struct StatusCommand {
@@ -67,17 +91,20 @@ fn write_status_table(
         return Ok(());
     }
 
-    writeln!(
+    write_status_table_row(
         writer,
-        "{:<8}  {:<16}  {:<16}  {:<36}  {:<24}  {:<16}  {:<12}  {:<14}  SUMMARY",
-        "TUI_PID",
-        "TUI_WORK",
-        "THREAD_WORK",
-        "THREAD_ID",
-        "AGENT_PATH",
-        "TASK_NAME",
-        "AGENT_TYPE",
-        "NICKNAME",
+        StatusTableRow {
+            pid: "TUI_PID".to_string(),
+            tui_work: "TUI_WORK".to_string(),
+            thread_work: "THREAD_WORK".to_string(),
+            thread_id: "THREAD_ID".to_string(),
+            agent_path: "AGENT_PATH".to_string(),
+            task_name: "TASK_NAME".to_string(),
+            agent_type: "AGENT_TYPE".to_string(),
+            nickname: "NICKNAME".to_string(),
+            summary: "SUMMARY".to_string(),
+        },
+        false,
     )?;
     for session in sessions {
         let mut rows = Vec::new();
@@ -86,35 +113,43 @@ fn write_status_table(
         }
         let session_work = session_work_state(&session.summary, &rows);
         if rows.is_empty() {
-            writeln!(
+            write_status_table_row(
                 writer,
-                "{:<8}  {:<16}  {:<16}  {:<36}  {:<24}  {:<16}  {:<12}  {:<14}  {}",
-                session.summary.pid,
-                session_work,
-                "-",
-                session.summary.root_thread_id.as_deref().unwrap_or("-"),
-                "/root",
-                "root",
-                "-",
-                "-",
-                ""
+                StatusTableRow {
+                    pid: session.summary.pid.to_string(),
+                    tui_work: session_work,
+                    thread_work: "-".to_string(),
+                    thread_id: session
+                        .summary
+                        .root_thread_id
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string()),
+                    agent_path: "/root".to_string(),
+                    task_name: "root".to_string(),
+                    agent_type: "-".to_string(),
+                    nickname: "-".to_string(),
+                    summary: String::new(),
+                },
+                true,
             )?;
             continue;
         }
         for row in rows {
             let thread_work = thread_work_state(&row.thread_state, &row.active_flags);
-            writeln!(
+            write_status_table_row(
                 writer,
-                "{:<8}  {:<16}  {:<16}  {:<36}  {:<24}  {:<16}  {:<12}  {:<14}  {}",
-                row.pid,
-                session_work,
-                thread_work,
-                row.thread_id,
-                truncate(row.agent_path.as_deref().unwrap_or("-"), 24),
-                truncate(row.task_name.as_deref().unwrap_or("-"), 16),
-                truncate(row.agent_type.as_deref().unwrap_or("-"), 12),
-                truncate(row.nickname.as_deref().unwrap_or("-"), 14),
-                row.summary.unwrap_or_default(),
+                StatusTableRow {
+                    pid: row.pid.to_string(),
+                    tui_work: session_work.clone(),
+                    thread_work,
+                    thread_id: row.thread_id,
+                    agent_path: row.agent_path.unwrap_or_else(|| "-".to_string()),
+                    task_name: row.task_name.unwrap_or_else(|| "-".to_string()),
+                    agent_type: row.agent_type.unwrap_or_else(|| "-".to_string()),
+                    nickname: row.nickname.unwrap_or_else(|| "-".to_string()),
+                    summary: row.summary.unwrap_or_default(),
+                },
+                true,
             )?;
         }
     }
@@ -396,16 +431,173 @@ fn thread_work_state(thread_state: &str, active_flags: &[String]) -> String {
     "working".to_string()
 }
 
-fn truncate(value: &str, width: usize) -> String {
-    let mut output = String::new();
-    for ch in value.chars() {
-        if output.chars().count() + 3 >= width {
-            output.push_str("...");
-            return output;
+struct StatusTableRow {
+    pid: String,
+    tui_work: String,
+    thread_work: String,
+    thread_id: String,
+    agent_path: String,
+    task_name: String,
+    agent_type: String,
+    nickname: String,
+    summary: String,
+}
+
+fn write_status_table_row(
+    writer: &mut dyn Write,
+    row: StatusTableRow,
+    wrap_summary: bool,
+) -> anyhow::Result<()> {
+    let summary_lines = if wrap_summary {
+        wrap_summary_lines(&row.summary)
+    } else {
+        vec![row.summary]
+    };
+    let fixed_cells = [
+        fit_cell(&row.pid, PID_WIDTH),
+        fit_cell(&row.tui_work, TUI_WORK_WIDTH),
+        fit_cell(&row.thread_work, THREAD_WORK_WIDTH),
+        fit_cell(&row.thread_id, THREAD_ID_WIDTH),
+        fit_cell(&row.agent_path, AGENT_PATH_WIDTH),
+        fit_cell(&row.task_name, TASK_NAME_WIDTH),
+        fit_cell(&row.agent_type, AGENT_TYPE_WIDTH),
+        fit_cell(&row.nickname, NICKNAME_WIDTH),
+    ];
+    let blank_cells = [
+        " ".repeat(PID_WIDTH),
+        " ".repeat(TUI_WORK_WIDTH),
+        " ".repeat(THREAD_WORK_WIDTH),
+        " ".repeat(THREAD_ID_WIDTH),
+        " ".repeat(AGENT_PATH_WIDTH),
+        " ".repeat(TASK_NAME_WIDTH),
+        " ".repeat(AGENT_TYPE_WIDTH),
+        " ".repeat(NICKNAME_WIDTH),
+    ];
+
+    for (index, summary_line) in summary_lines.iter().enumerate() {
+        let cells = if index == 0 {
+            &fixed_cells
+        } else {
+            &blank_cells
+        };
+        writeln!(
+            writer,
+            "{}{}{}",
+            cells.join(COLUMN_SEPARATOR),
+            COLUMN_SEPARATOR,
+            truncate_with_ellipsis(summary_line, SUMMARY_WIDTH),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn wrap_summary_lines(summary: &str) -> Vec<String> {
+    let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+    let mut truncated = false;
+
+    for ch in normalized.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width + ch_width > SUMMARY_WIDTH && !current.is_empty() {
+            lines.push(current.trim_end().to_string());
+            current.clear();
+            current_width = 0;
+            if lines.len() == SUMMARY_MAX_LINES {
+                truncated = true;
+                break;
+            }
+            if ch == ' ' {
+                continue;
+            }
         }
-        output.push(ch);
+        current.push(ch);
+        current_width += ch_width;
+    }
+
+    if !truncated && !current.is_empty() {
+        lines.push(current.trim_end().to_string());
+    }
+
+    if lines.len() > SUMMARY_MAX_LINES {
+        lines.truncate(SUMMARY_MAX_LINES);
+        truncated = true;
+    }
+
+    if truncated && let Some(last) = lines.last_mut() {
+        *last = append_ellipsis(last.trim_end(), SUMMARY_WIDTH);
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn fit_cell(value: &str, width: usize) -> String {
+    let truncated = truncate_with_ellipsis(value, width);
+    pad_to_width(&truncated, width)
+}
+
+fn pad_to_width(value: &str, width: usize) -> String {
+    let mut output = value.to_string();
+    let output_width = display_width(&output);
+    if output_width < width {
+        output.push_str(&" ".repeat(width - output_width));
     }
     output
+}
+
+fn truncate_with_ellipsis(value: &str, width: usize) -> String {
+    if display_width(value) <= width {
+        return value.to_string();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let mut output = truncate_to_width(value, width - 3);
+    while output.ends_with(' ') {
+        output.pop();
+    }
+    output.push_str("...");
+    output
+}
+
+fn append_ellipsis(value: &str, width: usize) -> String {
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+    let mut output = truncate_to_width(value, width - 3);
+    while output.ends_with(' ') {
+        output.pop();
+    }
+    output.push_str("...");
+    output
+}
+
+fn truncate_to_width(value: &str, width: usize) -> String {
+    let mut output = String::new();
+    let mut output_width = 0;
+    for ch in value.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if output_width + ch_width > width {
+            break;
+        }
+        output.push(ch);
+        output_width += ch_width;
+    }
+    output
+}
+
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
 }
 
 #[cfg(all(test, unix))]
