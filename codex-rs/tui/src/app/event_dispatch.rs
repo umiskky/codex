@@ -1728,9 +1728,12 @@ impl App {
                 self.select_agent_thread_and_discard_side(tui, app_server, thread_id)
                     .await?;
             }
-            AppEvent::ResumeAgentThread(thread_id) => {
+            AppEvent::OpenAgentResumeScopePicker(thread_id) => {
+                self.open_agent_resume_scope_picker(thread_id);
+            }
+            AppEvent::ResumeAgentThread { thread_id, scope } => {
                 if let Err(err) = self
-                    .resume_agent_thread_from_history(tui, app_server, thread_id)
+                    .resume_agent_thread_from_history_with_scope(tui, app_server, thread_id, scope)
                     .await
                 {
                     self.chat_widget

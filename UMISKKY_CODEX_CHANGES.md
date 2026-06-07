@@ -9,12 +9,13 @@ behavior.
 Build and install the custom CLI as:
 
 ```bash
-CARGO_BUILD_JOBS=3 cargo rustc -p codex-cli --bin codex --release --locked -- -C lto=off -C codegen-units=16
+CARGO_BUILD_JOBS=6 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo build -p codex-cli --bin codex --release --locked
 sudo install -m 0755 target/release/codex /usr/local/bin/codexx
 ```
 
-`lto=off` is used to reduce link time and memory pressure. It does not change the feature
-surface; it mainly affects binary size and optimization.
+`CARGO_PROFILE_RELEASE_LTO=false` is used to reduce link time and memory pressure across
+the whole release build. It does not change the feature surface; it mainly affects binary
+size and optimization.
 
 ## Multi-Agent Changes
 
@@ -94,11 +95,16 @@ so historical lists have a useful summary even before the child produces a later
 Codexx keeps the regular `/agent` picker focused on agents already loaded in the current
 TUI session. It no longer mixes in every historical subagent by default.
 
+Both `/agent` and `/agent resume` render fixed, single-line table rows sorted by canonical
+agent path. The columns are status, task name, agent path, thread id prefix, agent type,
+nickname, and summary.
+
 Additional commands:
 
 - `/agent resume` lists recoverable historical subagents that are not loaded in the current
-  TUI session. Rows include task name, canonical path, thread id prefix, role/nickname, and
-  a short summary.
+  TUI session. Selecting a row opens a second picker where the default action restores only
+  the selected agent, and the alternate action restores the selected agent plus recoverable
+  descendants below its agent path.
 - `/agent resume --all` restores all recoverable historical subagents under the current root
   session.
 - `/agent new` opens an interactive flow. First choose a registered `agent_type`, then enter
@@ -202,6 +208,7 @@ CARGO_BUILD_JOBS=3 cargo check -p codex-app-server
 CARGO_BUILD_JOBS=3 cargo check -p codex-tui
 RUST_MIN_STACK=8388608 CARGO_BUILD_JOBS=3 cargo nextest run -p codex-core codexx_
 CARGO_BUILD_JOBS=3 cargo test -p codex-tui parse_agent_new_prompt_requires_task_and_message
+CARGO_BUILD_JOBS=6 cargo test -p codex-tui codexx_agent_picker_
 CARGO_BUILD_JOBS=3 cargo test -p codex-tui permissions_selection_shows_custom_current_when_no_builtin_preset_matches
 CARGO_BUILD_JOBS=3 cargo test -p codex-tui embedded_thread_response_uses_response_sandbox_profile
 CARGO_BUILD_JOBS=3 cargo test -p codex-utils-cli resume_hint_can_use_codexx_binary_name

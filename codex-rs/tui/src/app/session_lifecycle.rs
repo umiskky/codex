@@ -6,6 +6,25 @@
 
 use super::*;
 
+const AGENT_STATUS_WIDTH: usize = 7;
+const AGENT_TASK_WIDTH: usize = 18;
+const AGENT_PATH_WIDTH: usize = 30;
+const AGENT_THREAD_WIDTH: usize = 8;
+const AGENT_TYPE_WIDTH: usize = 12;
+const AGENT_NICKNAME_WIDTH: usize = 14;
+const AGENT_SUMMARY_WIDTH: usize = 36;
+
+#[derive(Debug, Clone)]
+struct AgentPickerRow {
+    thread_id: ThreadId,
+    status: String,
+    task_name: String,
+    agent_path: Option<String>,
+    agent_type: String,
+    nickname: String,
+    summary: String,
+}
+
 impl App {
     pub(super) async fn open_agent_picker(&mut self, app_server: &mut AppServerSession) {
         let mut thread_ids = self.agent_navigation.tracked_thread_ids();
@@ -41,33 +60,43 @@ impl App {
         }
 
         let mut initial_selected_idx = None;
-        let items: Vec<SelectionItem> = self
+        let mut rows = Vec::new();
+        let ordered_threads = self
             .agent_navigation
             .ordered_threads()
-            .iter()
+            .into_iter()
+            .map(|(thread_id, entry)| (thread_id, entry.clone()))
+            .collect::<Vec<_>>();
+        for (thread_id, entry) in ordered_threads {
+            let thread = app_server
+                .thread_read(thread_id, /*include_turns*/ false)
+                .await
+                .ok();
+            rows.push(agent_picker_row_from_active_thread(
+                thread_id,
+                &entry,
+                thread.as_ref(),
+                self.primary_thread_id,
+                self.active_thread_id,
+            ));
+        }
+        rows.sort_by(compare_agent_picker_rows);
+        let items: Vec<SelectionItem> = rows
+            .into_iter()
             .enumerate()
-            .map(|(idx, (thread_id, entry))| {
-                if self.active_thread_id == Some(*thread_id) {
+            .map(|(idx, row)| {
+                if self.active_thread_id == Some(row.thread_id) {
                     initial_selected_idx = Some(idx);
                 }
-                let id = *thread_id;
-                let is_primary = self.primary_thread_id == Some(*thread_id);
-                let name = format_agent_picker_item_name(
-                    entry.agent_nickname.as_deref(),
-                    entry.agent_role.as_deref(),
-                    is_primary,
-                );
-                let uuid = thread_id.to_string();
+                let id = row.thread_id;
+                let search_value = agent_picker_row_search_value(&row);
                 SelectionItem {
-                    name: name.clone(),
-                    name_prefix_spans: agent_picker_status_dot_spans(entry.is_closed),
-                    description: Some(uuid.clone()),
-                    is_current: self.active_thread_id == Some(*thread_id),
+                    name: format_agent_table_row(&row),
                     actions: vec![Box::new(move |tx| {
                         tx.send(AppEvent::SelectAgentThread(id));
                     })],
                     dismiss_on_select: true,
-                    search_value: Some(format!("{name} {uuid}")),
+                    search_value: Some(search_value),
                     ..Default::default()
                 }
             })
@@ -79,6 +108,10 @@ impl App {
             footer_hint: Some(standard_popup_hint_line()),
             items,
             initial_selected_idx,
+            is_searchable: true,
+            col_width_mode: ColumnWidthMode::AutoAllRows,
+            row_display: SelectionRowDisplay::SingleLine,
+            header: Box::new(agent_table_header_line()),
             ..Default::default()
         });
     }
@@ -103,59 +136,27 @@ impl App {
             return;
         }
 
-        let mut items = Vec::with_capacity(threads.len() + 1);
-        items.push(SelectionItem {
-            name: "Resume all shown agents".to_string(),
-            description: Some(format!("{} recoverable agents", threads.len())),
-            actions: vec![Box::new(|tx| {
-                tx.send(AppEvent::ResumeAllRecoverableAgents);
-            })],
-            dismiss_on_select: true,
-            search_value: Some("resume all recoverable agents".to_string()),
-            ..Default::default()
-        });
-
-        items.extend(threads.into_iter().map(|thread| {
-            let id = ThreadId::from_string(&thread.id).expect("filtered thread ids are valid");
-            let path = agent_path_from_thread(&thread).unwrap_or_else(|| "/root/?".to_string());
-            let task_name = path
-                .rsplit('/')
-                .next()
-                .filter(|value| !value.is_empty())
-                .unwrap_or("agent");
-            let nickname = thread
-                .agent_nickname
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or("Agent");
-            let role = thread
-                .agent_role
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or("default");
-            let short_id = thread.id.chars().take(8).collect::<String>();
-            let summary = thread
-                .name
-                .clone()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| thread.preview.clone());
-            SelectionItem {
-                name: format!("{nickname} [{role}]"),
-                name_prefix_spans: agent_picker_status_dot_spans(/*is_closed*/ true),
-                description: Some(format!(
-                    "task={task_name} path={path} thread={short_id} summary={summary}"
-                )),
-                actions: vec![Box::new(move |tx| {
-                    tx.send(AppEvent::ResumeAgentThread(id));
-                })],
-                dismiss_on_select: true,
-                search_value: Some(format!(
-                    "{nickname} {role} {task_name} {path} {} {summary}",
-                    thread.id
-                )),
-                ..Default::default()
-            }
-        }));
+        let mut rows = threads
+            .iter()
+            .filter_map(|thread| agent_picker_row_from_recoverable_thread(thread))
+            .collect::<Vec<_>>();
+        rows.sort_by(compare_agent_picker_rows);
+        let items = rows
+            .into_iter()
+            .map(|row| {
+                let id = row.thread_id;
+                let search_value = agent_picker_row_search_value(&row);
+                SelectionItem {
+                    name: format_agent_table_row(&row),
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::OpenAgentResumeScopePicker(id));
+                    })],
+                    dismiss_on_select: true,
+                    search_value: Some(search_value),
+                    ..Default::default()
+                }
+            })
+            .collect::<Vec<_>>();
 
         self.chat_widget.show_selection_view(SelectionViewParams {
             title: Some("Subagents".to_string()),
@@ -163,6 +164,50 @@ impl App {
             footer_hint: Some(standard_popup_hint_line()),
             items,
             is_searchable: true,
+            col_width_mode: ColumnWidthMode::AutoAllRows,
+            row_display: SelectionRowDisplay::SingleLine,
+            header: Box::new(agent_table_header_line()),
+            ..Default::default()
+        });
+    }
+
+    pub(super) fn open_agent_resume_scope_picker(&mut self, thread_id: ThreadId) {
+        let items = vec![
+            SelectionItem {
+                name: "Resume selected agent".to_string(),
+                description: Some("Only attach the selected historical subagent.".to_string()),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::ResumeAgentThread {
+                        thread_id,
+                        scope: AgentResumeScope::SelfOnly,
+                    });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Resume selected agent and descendants".to_string(),
+                description: Some(
+                    "Attach the selected subagent plus all recoverable child subagents."
+                        .to_string(),
+                ),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::ResumeAgentThread {
+                        thread_id,
+                        scope: AgentResumeScope::AllDescendants,
+                    });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+        ];
+
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            title: Some("Resume Subagent".to_string()),
+            subtitle: Some(thread_id.to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            initial_selected_idx: Some(0),
             col_width_mode: ColumnWidthMode::AutoAllRows,
             ..Default::default()
         });
@@ -347,6 +392,97 @@ impl App {
     ) -> Result<()> {
         self.resume_agent_thread_into_session(app_server, thread_id)
             .await?;
+        self.select_agent_thread_and_discard_side(tui, app_server, thread_id)
+            .await
+    }
+
+    pub(super) async fn resume_agent_thread_from_history_with_scope(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+        scope: AgentResumeScope,
+    ) -> Result<()> {
+        match scope {
+            AgentResumeScope::SelfOnly => {
+                self.resume_agent_thread_from_history(tui, app_server, thread_id)
+                    .await
+            }
+            AgentResumeScope::AllDescendants => {
+                self.resume_agent_thread_and_descendants_from_history(tui, app_server, thread_id)
+                    .await
+            }
+        }
+    }
+
+    async fn resume_agent_thread_and_descendants_from_history(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+    ) -> Result<()> {
+        let threads = self.recoverable_agent_threads(app_server).await?;
+        let thread_by_id = threads
+            .iter()
+            .filter_map(|thread| {
+                ThreadId::from_string(&thread.id)
+                    .ok()
+                    .map(|id| (id, thread.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut target_agent_path = threads
+            .iter()
+            .find(|thread| ThreadId::from_string(&thread.id).ok() == Some(thread_id))
+            .and_then(agent_path_from_thread);
+        if target_agent_path.is_none() {
+            target_agent_path = app_server
+                .thread_read(thread_id, /*include_turns*/ false)
+                .await
+                .ok()
+                .and_then(|thread| agent_path_from_thread(&thread));
+        }
+        let descendant_ids = threads
+            .iter()
+            .filter_map(|thread| {
+                let id = ThreadId::from_string(&thread.id).ok()?;
+                (id != thread_id
+                    && thread_is_descendant_of_agent(
+                        thread,
+                        thread_id,
+                        target_agent_path.as_deref(),
+                        &thread_by_id,
+                    ))
+                .then_some(id)
+            })
+            .collect::<Vec<_>>();
+
+        self.resume_agent_thread_into_session(app_server, thread_id)
+            .await?;
+        let mut resumed_descendants = 0usize;
+        for descendant_id in &descendant_ids {
+            match self
+                .resume_agent_thread_into_session(app_server, *descendant_id)
+                .await
+            {
+                Ok(()) => resumed_descendants += 1,
+                Err(err) => {
+                    tracing::warn!(
+                        thread_id = %descendant_id,
+                        "failed to resume recoverable descendant agent: {err}"
+                    );
+                }
+            }
+        }
+
+        if !descendant_ids.is_empty() {
+            self.chat_widget.add_info_message(
+                format!(
+                    "Resumed selected agent and {resumed_descendants} of {} descendants.",
+                    descendant_ids.len()
+                ),
+                /*hint*/ None,
+            );
+        }
         self.select_agent_thread_and_discard_side(tui, app_server, thread_id)
             .await
     }
@@ -1140,6 +1276,210 @@ impl App {
     }
 }
 
+fn agent_table_header_line() -> Line<'static> {
+    Line::from(format!("  {}", format_agent_table_header())).dim()
+}
+
+fn format_agent_table_header() -> String {
+    format_agent_table_cells(
+        "STATUS",
+        "TASK",
+        "AGENT PATH",
+        "THREAD",
+        "TYPE",
+        "NICKNAME",
+        "SUMMARY",
+    )
+}
+
+fn format_agent_table_row(row: &AgentPickerRow) -> String {
+    format_agent_table_cells(
+        &row.status,
+        &row.task_name,
+        row.agent_path.as_deref().unwrap_or("-"),
+        &short_thread_id(row.thread_id),
+        &row.agent_type,
+        &row.nickname,
+        &row.summary,
+    )
+}
+
+fn format_agent_table_cells(
+    status: &str,
+    task: &str,
+    agent_path: &str,
+    thread_id: &str,
+    agent_type: &str,
+    nickname: &str,
+    summary: &str,
+) -> String {
+    [
+        fixed_width_cell(status, AGENT_STATUS_WIDTH),
+        fixed_width_cell(task, AGENT_TASK_WIDTH),
+        fixed_width_cell(agent_path, AGENT_PATH_WIDTH),
+        fixed_width_cell(thread_id, AGENT_THREAD_WIDTH),
+        fixed_width_cell(agent_type, AGENT_TYPE_WIDTH),
+        fixed_width_cell(nickname, AGENT_NICKNAME_WIDTH),
+        fixed_width_cell(summary, AGENT_SUMMARY_WIDTH),
+    ]
+    .join("  ")
+}
+
+fn fixed_width_cell(value: &str, width: usize) -> String {
+    let normalized = value.replace(['\n', '\r'], " ");
+    let trimmed = normalized.trim();
+    let value = if trimmed.is_empty() { "-" } else { trimmed };
+    let mut chars = value.chars();
+    let mut cell = chars.by_ref().take(width).collect::<String>();
+    if chars.next().is_some() && width >= 3 {
+        cell = cell
+            .chars()
+            .take(width.saturating_sub(3))
+            .collect::<String>();
+        cell.push_str("...");
+    }
+    format!("{cell:<width$}")
+}
+
+fn short_thread_id(thread_id: ThreadId) -> String {
+    thread_id.to_string().chars().take(8).collect()
+}
+
+fn agent_picker_row_from_active_thread(
+    thread_id: ThreadId,
+    entry: &AgentPickerThreadEntry,
+    thread: Option<&Thread>,
+    primary_thread_id: Option<ThreadId>,
+    active_thread_id: Option<ThreadId>,
+) -> AgentPickerRow {
+    let is_primary = primary_thread_id == Some(thread_id);
+    let agent_path = thread
+        .and_then(agent_path_from_thread)
+        .or_else(|| is_primary.then(|| "/root".to_string()));
+    let task_name = task_name_from_agent_path(agent_path.as_deref())
+        .unwrap_or_else(|| if is_primary { "root" } else { "-" }.to_string());
+    let nickname = thread
+        .and_then(|thread| non_empty_string(thread.agent_nickname.as_deref()))
+        .or_else(|| non_empty_string(entry.agent_nickname.as_deref()))
+        .unwrap_or_else(|| {
+            if is_primary {
+                "Main".to_string()
+            } else {
+                "-".to_string()
+            }
+        });
+    let agent_type = thread
+        .and_then(|thread| non_empty_string(thread.agent_role.as_deref()))
+        .or_else(|| non_empty_string(entry.agent_role.as_deref()))
+        .unwrap_or_else(|| {
+            if is_primary {
+                "default".to_string()
+            } else {
+                "-".to_string()
+            }
+        });
+    let summary = thread_summary(thread).unwrap_or_else(|| {
+        if is_primary {
+            "Main session".to_string()
+        } else {
+            "-".to_string()
+        }
+    });
+    let status = if active_thread_id == Some(thread_id) {
+        "current"
+    } else if entry.is_closed {
+        "closed"
+    } else {
+        thread
+            .map(|thread| thread_status_label(&thread.status))
+            .unwrap_or("open")
+    }
+    .to_string();
+
+    AgentPickerRow {
+        thread_id,
+        status,
+        task_name,
+        agent_path,
+        agent_type,
+        nickname,
+        summary,
+    }
+}
+
+fn agent_picker_row_from_recoverable_thread(thread: &Thread) -> Option<AgentPickerRow> {
+    let thread_id = ThreadId::from_string(&thread.id).ok()?;
+    let agent_path = agent_path_from_thread(thread);
+    Some(AgentPickerRow {
+        thread_id,
+        status: thread_status_label(&thread.status).to_string(),
+        task_name: task_name_from_agent_path(agent_path.as_deref()).unwrap_or_else(|| "-".into()),
+        agent_path,
+        agent_type: non_empty_string(thread.agent_role.as_deref()).unwrap_or_else(|| "-".into()),
+        nickname: non_empty_string(thread.agent_nickname.as_deref()).unwrap_or_else(|| "-".into()),
+        summary: thread_summary(Some(thread)).unwrap_or_else(|| "-".into()),
+    })
+}
+
+fn compare_agent_picker_rows(left: &AgentPickerRow, right: &AgentPickerRow) -> std::cmp::Ordering {
+    agent_row_sort_key(left).cmp(&agent_row_sort_key(right))
+}
+
+fn agent_row_sort_key(row: &AgentPickerRow) -> (bool, String, String) {
+    (
+        row.agent_path.is_none(),
+        row.agent_path.clone().unwrap_or_default(),
+        row.thread_id.to_string(),
+    )
+}
+
+fn agent_picker_row_search_value(row: &AgentPickerRow) -> String {
+    [
+        row.status.clone(),
+        row.task_name.clone(),
+        row.agent_path.clone().unwrap_or_default(),
+        row.thread_id.to_string(),
+        row.agent_type.clone(),
+        row.nickname.clone(),
+        row.summary.clone(),
+    ]
+    .join(" ")
+}
+
+fn thread_status_label(status: &codex_app_server_protocol::ThreadStatus) -> &'static str {
+    match status {
+        codex_app_server_protocol::ThreadStatus::NotLoaded => "closed",
+        codex_app_server_protocol::ThreadStatus::Idle => "open",
+        codex_app_server_protocol::ThreadStatus::SystemError => "error",
+        codex_app_server_protocol::ThreadStatus::Active { .. } => "active",
+    }
+}
+
+fn thread_summary(thread: Option<&Thread>) -> Option<String> {
+    let thread = thread?;
+    non_empty_string(thread.name.as_deref())
+        .or_else(|| non_empty_string(Some(thread.preview.as_str())))
+}
+
+fn task_name_from_agent_path(agent_path: Option<&str>) -> Option<String> {
+    let agent_path = agent_path?;
+    let task_name = agent_path.rsplit('/').next()?;
+    if task_name.is_empty() {
+        return None;
+    }
+    if task_name == "root" {
+        return (agent_path == "/root").then(|| "root".to_string());
+    }
+    Some(task_name.to_string())
+}
+
+fn non_empty_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn agent_path_from_thread(thread: &Thread) -> Option<String> {
     match &thread.source {
         codex_app_server_protocol::SessionSource::SubAgent(
@@ -1201,6 +1541,42 @@ fn thread_is_descendant_of_primary(
             .and_then(parent_thread_id_from_thread);
     }
     false
+}
+
+fn thread_is_descendant_of_agent(
+    thread: &Thread,
+    ancestor_thread_id: ThreadId,
+    ancestor_agent_path: Option<&str>,
+    thread_by_id: &HashMap<ThreadId, Thread>,
+) -> bool {
+    let mut seen = HashSet::new();
+    let mut parent_thread_id = parent_thread_id_from_thread(thread);
+    while let Some(parent_id) = parent_thread_id {
+        if parent_id == ancestor_thread_id {
+            return true;
+        }
+        if !seen.insert(parent_id) {
+            break;
+        }
+        parent_thread_id = thread_by_id
+            .get(&parent_id)
+            .and_then(parent_thread_id_from_thread);
+    }
+
+    match (agent_path_from_thread(thread), ancestor_agent_path) {
+        (Some(agent_path), Some(ancestor_agent_path)) => {
+            agent_path_is_descendant_of(&agent_path, ancestor_agent_path)
+        }
+        _ => false,
+    }
+}
+
+fn agent_path_is_descendant_of(agent_path: &str, ancestor_agent_path: &str) -> bool {
+    if agent_path == ancestor_agent_path {
+        return false;
+    }
+    let ancestor_prefix = format!("{}/", ancestor_agent_path.trim_end_matches('/'));
+    agent_path.starts_with(&ancestor_prefix)
 }
 
 #[cfg(test)]
@@ -1269,5 +1645,100 @@ mod tests {
         assert!(parse_agent_new_prompt("research").is_err());
         assert!(parse_agent_new_prompt(" -- inspect").is_err());
         assert!(parse_agent_new_prompt("research -- ").is_err());
+    }
+
+    #[test]
+    fn codexx_agent_picker_table_row_renders_separate_columns() {
+        let row = AgentPickerRow {
+            thread_id: ThreadId::from_string("00000000-0000-0000-0000-000000000123")
+                .expect("valid thread id"),
+            status: "open".to_string(),
+            task_name: "inspect".to_string(),
+            agent_path: Some("/root/inspect".to_string()),
+            agent_type: "reviewer".to_string(),
+            nickname: "Ada".to_string(),
+            summary: "Review the implementation".to_string(),
+        };
+
+        let header = format_agent_table_header();
+        let rendered = format_agent_table_row(&row);
+
+        assert!(header.contains("AGENT PATH"));
+        assert!(rendered.contains("/root/inspect"));
+        assert!(rendered.contains("reviewer"));
+        assert!(rendered.contains("Ada"));
+        assert!(rendered.contains("00000000"));
+        assert!(!rendered.contains("task="));
+        assert!(!rendered.contains("path="));
+    }
+
+    #[test]
+    fn codexx_agent_picker_rows_sort_by_agent_path_with_missing_paths_last() {
+        fn row(id_suffix: &str, agent_path: Option<&str>) -> AgentPickerRow {
+            AgentPickerRow {
+                thread_id: ThreadId::from_string(&format!(
+                    "00000000-0000-0000-0000-000000000{id_suffix}"
+                ))
+                .expect("valid thread id"),
+                status: "open".to_string(),
+                task_name: "-".to_string(),
+                agent_path: agent_path.map(ToOwned::to_owned),
+                agent_type: "-".to_string(),
+                nickname: "-".to_string(),
+                summary: "-".to_string(),
+            }
+        }
+
+        let mut rows = vec![
+            row("003", Some("/root/b")),
+            row("004", None),
+            row("002", Some("/root/a")),
+            row("001", Some("/root")),
+        ];
+
+        rows.sort_by(compare_agent_picker_rows);
+
+        let sorted_paths = rows
+            .iter()
+            .map(|row| row.agent_path.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sorted_paths,
+            vec![Some("/root"), Some("/root/a"), Some("/root/b"), None]
+        );
+    }
+
+    #[test]
+    fn codexx_agent_picker_task_name_from_agent_path_uses_last_path_component() {
+        assert_eq!(
+            task_name_from_agent_path(Some("/root")),
+            Some("root".to_string())
+        );
+        assert_eq!(
+            task_name_from_agent_path(Some("/root/research")),
+            Some("research".to_string())
+        );
+        assert_eq!(
+            task_name_from_agent_path(Some("/root/research/deep")),
+            Some("deep".to_string())
+        );
+        assert_eq!(task_name_from_agent_path(Some("/")), None);
+        assert_eq!(task_name_from_agent_path(None), None);
+    }
+
+    #[test]
+    fn codexx_agent_picker_path_descendant_requires_strict_child_path() {
+        assert!(agent_path_is_descendant_of(
+            "/root/research/deep",
+            "/root/research"
+        ));
+        assert!(!agent_path_is_descendant_of(
+            "/root/research",
+            "/root/research"
+        ));
+        assert!(!agent_path_is_descendant_of(
+            "/root/researcher",
+            "/root/research"
+        ));
     }
 }

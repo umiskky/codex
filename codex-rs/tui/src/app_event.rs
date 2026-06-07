@@ -133,6 +133,12 @@ pub(crate) enum KeymapEditIntent {
     ReplaceOne { old_key: String },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentResumeScope {
+    SelfOnly,
+    AllDescendants,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
@@ -155,8 +161,13 @@ pub(crate) enum AppEvent {
     },
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
+    /// Choose how to resume one historical subagent.
+    OpenAgentResumeScopePicker(ThreadId),
     /// Resume one historical subagent into the current TUI session.
-    ResumeAgentThread(ThreadId),
+    ResumeAgentThread {
+        thread_id: ThreadId,
+        scope: AgentResumeScope,
+    },
     /// Resume every historical subagent currently recoverable under the primary thread.
     ResumeAllRecoverableAgents,
 
